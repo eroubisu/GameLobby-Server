@@ -567,6 +567,11 @@ class LobbyEngine:
         
         elif cmd == '/version':
             from .config import SERVER_VERSION
+            return {
+                'action': 'version',
+                'server_version': SERVER_VERSION,
+                'message': f"服务器版本: v{SERVER_VERSION}"
+            }
         
         # 背包系统 - 查看背包 (全局可用)
         elif cmd == '/item':
