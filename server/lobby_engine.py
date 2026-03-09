@@ -90,7 +90,8 @@ class LobbyEngine:
 
 【导航指令】
   /back           - 返回上一级
-  /home           - 返回大厅
+  /quit           - 离开当前游戏
+  /home           - 直接返回大厅
 
 【可用游戏】
 {games_list}
@@ -103,7 +104,7 @@ class LobbyEngine:
 【其他指令】
   /version        - 查看版本信息
   /clear          - 清屏
-  /exit           - 退出程序
+  /exit           - 关闭程序
 
 ==============================
 提示: 输入 /help jrpg 查看JRPG说明书
@@ -169,6 +170,7 @@ class LobbyEngine:
   /accept        接受邀请
 
 【导航】
+  /quit          离开麻将游戏
   /back          返回上一级
   /home          返回大厅
 
@@ -316,6 +318,7 @@ class LobbyEngine:
   /password      - 修改密码
   /delete        - 删除账号
   /back          - 返回大厅
+  /home          - 返回大厅
 """
         }
     
@@ -468,7 +471,7 @@ class LobbyEngine:
                         self.pending_confirms[player_name] = ('create_room', {'game_mode': None, 'match_type': match_type})
                         
                         text = f"已选择: {match_info.get('name_cn', match_type)}\n\n"
-                        text += "请选择游戏模式:\n\n"
+                        text += "请选择游戏模式:  (输入编号，或其他任意指令取消)\n\n"
                         text += "  1. tonpu (東風戦/东风战) - 4局\n"
                         text += "  2. hanchan (半荘戦/半庄战) - 8局"
                         return text
@@ -731,7 +734,11 @@ class LobbyEngine:
         elif cmd == '/exit':
             # 设置待确认状态
             self.pending_confirms[player_name] = 'exit'
-            return "确定要退出程序吗？输入 /y 确认，其他任意键取消。"
+            return "⚠️ /exit 会关闭整个程序！确定要退出吗？输入 /y 确认。\n提示: 如果只是想离开当前游戏，请使用 /quit 或 /back"
+        
+        # /quit - 离开当前游戏/房间（等同 /back）
+        elif cmd == '/quit':
+            return self._do_back(player_name)
         
         # /home - 直接返回大厅
         elif cmd == '/home':
@@ -796,6 +803,7 @@ class LobbyEngine:
   /join <房间ID> - 加入房间
   /rank        - 查看段位详情
   /stats       - 查看战绩统计
+  /quit        - 离开麻将
   /back        - 返回上一级
 
 输入 /help mahjong 查看完整说明
@@ -809,7 +817,7 @@ class LobbyEngine:
 {info['icon']} 进入 {info['name']}
 
 输入 /help {game_id} 查看游戏说明
-输入 /back 返回上一级
+输入 /quit 或 /back 离开游戏
 """
             }
         
@@ -1082,7 +1090,7 @@ class LobbyEngine:
                     player_rank = player_data.get('mahjong', {}).get('rank', 'novice_1')
                     player_rank_idx = get_rank_index(player_rank)
                     
-                    text = "请选择段位场:\n\n"
+                    text = "请选择段位场:  (输入编号，或其他任意指令取消)\n\n"
                     text += "  1. yuujin (友人场) - 不影响段位\n"
                     
                     match_list = [
@@ -1104,7 +1112,7 @@ class LobbyEngine:
                     # 已选段位场，选游戏模式
                     match_info = MahjongRoom.MATCH_TYPES.get(match_type, {})
                     text = f"已选择: {match_info.get('name_cn', match_type)}\n\n"
-                    text += "请选择游戏模式:\n\n"
+                    text += "请选择游戏模式:  (输入编号，或其他任意指令取消)\n\n"
                     text += "  1. tonpu (東風戦/东风战) - 4局\n"
                     text += "  2. hanchan (半荘戦/半庄战) - 8局"
                     return text
@@ -1603,6 +1611,9 @@ class LobbyEngine:
                                     result_lines.append(f"    升段！→ {change_info.get('new_rank_name', '')}")
                                 elif change_info.get('demoted'):
                                     result_lines.append(f"    降段... → {change_info.get('new_rank_name', '')}")
+                
+                result_lines.append("")
+                result_lines.append("输入 /start 再来一局，/quit 或 /back 离开房间")
                 
                 return {
                     'action': 'mahjong_game_end',
@@ -2667,7 +2678,7 @@ class LobbyEngine:
             if engine:
                 room = engine.get_player_room(player_name)
                 if room and room.state == 'playing':
-                    return "⚠️ 游戏进行中！请先输入 /back 退出对局。"
+                    return "⚠️ 游戏进行中！请先输入 /quit 或 /back 退出对局。"
                 engine.leave_room(player_name)
         
         self.set_player_location(player_name, 'lobby')

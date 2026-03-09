@@ -585,7 +585,7 @@ class ChatServer:
             msg_lines.append(f"🔄 {room.players[room.dealer]} 连庄")
         else:
             msg_lines.append("➡️ 轮庄")
-        msg_lines += ["", "输入 /next 开始下一局", "输入 /back 返回上一级"]
+        msg_lines += ["", "输入 /next 开始下一局", "输入 /quit 或 /back 离开"]
         
         self._notify_room_update(room_id, '\n'.join(msg_lines), room.get_table_data())
     
