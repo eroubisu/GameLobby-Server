@@ -727,11 +727,6 @@ class LobbyEngine:
                 
             except ValueError:
                 return "请输入头衔编号。使用 /titles 查看列表。"
-            return {
-                'action': 'version',
-                'server_version': SERVER_VERSION,
-                'message': f"服务器版本: v{SERVER_VERSION}"
-            }
         
         elif cmd == '/exit':
             # 设置待确认状态
@@ -971,6 +966,64 @@ class LobbyEngine:
         
         return rank_changes
     
+    def _build_game_start_result(self, room, player_name, msg_prefix, notify_prefix):
+        """构建游戏开始/下一局的返回结果"""
+        for p in room.players.values():
+            if p and isinstance(p, str) and not p.startswith('机器人'):
+                self.set_player_location(p, 'mahjong_playing')
+        pos = room.get_position(player_name)
+        my_hand = room.hands[pos]
+        dealer_pos = room.dealer
+        dealer_name = room.players[dealer_pos]
+        drawn_tile = my_hand[-1] if pos == dealer_pos and len(my_hand) == 14 else None
+        my_wind = room.get_player_wind(pos)
+
+        msg = msg_prefix + f"庄家: {dealer_name}\n你的位置: {my_wind}家\n\n"
+        if pos == dealer_pos:
+            msg += "🎲 你是庄家，请出牌！\n输入 /d 编号 打出一张牌"
+        else:
+            msg += f"轮到 {dealer_name} 出牌\n输入 /h 查看手牌"
+
+        return {
+            'action': 'mahjong_game_start',
+            'location': 'mahjong_playing',
+            'message': msg,
+            'hand': my_hand,
+            'drawn': drawn_tile,
+            'room_data': room.get_table_data(),
+            'room_id': room.room_id,
+            'dealer_name': dealer_name,
+            'tenpai_analysis': room.get_tenpai_analysis(pos),
+            'notify_room': {
+                'room_id': room.room_id,
+                'message': f"{notify_prefix}庄家: {dealer_name}\n输入 /h 查看手牌",
+                'room_data': room.get_table_data(),
+                'game_started': True,
+                'location': 'mahjong_playing'
+            }
+        }
+
+    def _build_ryuukyoku_msg(self, room, ryuukyoku_result, prefix_lines=None):
+        """构建流局消息文本"""
+        tenpai_names = [room.players[i] for i in ryuukyoku_result['tenpai']]
+        noten_names = [room.players[i] for i in ryuukyoku_result['noten']]
+        lines = list(prefix_lines or [])
+        lines.append("荒牌流局！牌山已摸完")
+        if tenpai_names:
+            lines.append(f"📗 听牌: {', '.join(tenpai_names)}")
+        if noten_names:
+            lines.append(f"📕 未听: {', '.join(noten_names)}")
+        for i in range(4):
+            change = ryuukyoku_result['score_changes'][i]
+            if change != 0:
+                sign = '+' if change > 0 else ''
+                lines.append(f"  {room.players[i]}: {sign}{change}")
+        if ryuukyoku_result.get('renchan'):
+            lines.append(f"🔄 {room.players[room.dealer]} 连庄")
+        else:
+            lines.append("➡️ 轮庄")
+        return '\n'.join(lines)
+
     def _handle_mahjong_command(self, player_name, player_data, cmd, args):
         """处理麻将游戏指令"""
         engine = self.game_engines['mahjong']
@@ -1484,57 +1537,11 @@ class LobbyEngine:
             
             # 开始游戏
             if room.start_game(engine.game_data):
-                # 设置所有玩家的位置为 mahjong_playing
-                for p in room.players.values():
-                    if p and isinstance(p, str) and not p.startswith('机器人'):
-                        self.set_player_location(p, 'mahjong_playing')
-                
-                # 获取当前玩家的手牌（座位可能变了）
-                pos = room.get_position(player_name)
-                my_hand = room.hands[pos]
-                
-                # 获取庄家信息
-                dealer_pos = room.dealer
-                dealer_name = room.players[dealer_pos]
-                
-                # 庄家有14张牌，标记最后一张为新摸的
-                drawn_tile = None
-                if pos == dealer_pos and len(my_hand) == 14:
-                    drawn_tile = my_hand[-1]
-                
-                # 我的自风
-                my_wind = room.get_player_wind(pos)
-                
-                msg = f" 游戏开始！座位已随机分配\n\n"
-                msg += f"庄家: {dealer_name}\n"
-                msg += f"你的位置: {my_wind}家\n\n"
-                
-                if pos == dealer_pos:
-                    msg += "🎲 你是庄家，请出牌！\n输入 /d 编号 打出一张牌"
-                else:
-                    msg += f"轮到 {dealer_name} 出牌\n输入 /h 查看手牌"
-                
-                # 获取听牌分析
-                tenpai_analysis = room.get_tenpai_analysis(pos)
-                
-                return {
-                    'action': 'mahjong_game_start',
-                    'location': 'mahjong_playing',
-                    'message': msg,
-                    'hand': my_hand,
-                    'drawn': drawn_tile,  # 庄家的第14张牌
-                    'room_data': room.get_table_data(),
-                    'room_id': room.room_id,  # 用于机器人自动打牌
-                    'dealer_name': dealer_name,  # 用于机器人自动打牌
-                    'tenpai_analysis': tenpai_analysis,
-                    'notify_room': {
-                        'room_id': room.room_id,
-                        'message': f" 游戏开始！座位已随机分配\n庄家: {dealer_name}\n输入 /h 查看手牌",
-                        'room_data': room.get_table_data(),
-                        'game_started': True,  # 标记游戏开始，让其他玩家也查看手牌
-                        'location': 'mahjong_playing'
-                    }
-                }
+                return self._build_game_start_result(
+                    room, player_name,
+                    " 游戏开始！座位已随机分配\n\n",
+                    " 游戏开始！座位已随机分配\n"
+                )
             else:
                 return "开始游戏失败。"
         
@@ -1550,56 +1557,15 @@ class LobbyEngine:
             next_round_result = room.start_next_round()
             
             if next_round_result:
-                # 确保所有玩家位置为 mahjong_playing
-                for p in room.players.values():
-                    if p and isinstance(p, str) and not p.startswith('机器人'):
-                        self.set_player_location(p, 'mahjong_playing')
-                
-                pos = room.get_position(player_name)
-                my_hand = room.hands[pos]
-                
-                dealer_pos = room.dealer
-                dealer_name = room.players[dealer_pos]
-                
-                drawn_tile = None
-                if pos == dealer_pos and len(my_hand) == 14:
-                    drawn_tile = my_hand[-1]
-                
-                my_wind = room.get_player_wind(pos)
-                
                 round_wind = room.round_wind
                 round_number = room.round_number + 1
                 honba = room.honba
-                
-                msg = f" {round_wind}{round_number}局 {honba}本场 开始！\n\n"
-                msg += f"庄家: {dealer_name}\n"
-                msg += f"你的位置: {my_wind}家\n\n"
-                
-                if pos == dealer_pos:
-                    msg += "🎲 你是庄家，请出牌！\n输入 /d 编号 打出一张牌"
-                else:
-                    msg += f"轮到 {dealer_name} 出牌\n输入 /h 查看手牌"
-                
-                tenpai_analysis = room.get_tenpai_analysis(pos)
-                
-                return {
-                    'action': 'mahjong_game_start',
-                    'location': 'mahjong_playing',
-                    'message': msg,
-                    'hand': my_hand,
-                    'drawn': drawn_tile,
-                    'room_data': room.get_table_data(),
-                    'room_id': room.room_id,
-                    'dealer_name': dealer_name,
-                    'tenpai_analysis': tenpai_analysis,
-                    'notify_room': {
-                        'room_id': room.room_id,
-                        'message': f" {round_wind}{round_number}局 {honba}本场 开始！\n庄家: {dealer_name}\n输入 /h 查看手牌",
-                        'room_data': room.get_table_data(),
-                        'game_started': True,
-                        'location': 'mahjong_playing'
-                    }
-                }
+                prefix = f" {round_wind}{round_number}局 {honba}本场 开始！\n"
+                return self._build_game_start_result(
+                    room, player_name,
+                    prefix + "\n",
+                    prefix
+                )
             else:
                 # 游戏结束 - 所有玩家返回房间
                 for p in room.players.values():
@@ -1810,44 +1776,18 @@ class LobbyEngine:
                 
                 # 检查是否荒牌流局（牌堆摸完）
                 if drawn is None:
-                    # 荒牌流局
                     ryuukyoku_result = room.process_ryuukyoku('exhaustive')
                     room.state = 'finished'
-                    
-                    # 构建流局消息
-                    tenpai_names = [room.players[i] for i in ryuukyoku_result['tenpai']]
-                    noten_names = [room.players[i] for i in ryuukyoku_result['noten']]
-                    
-                    msg_lines = ["荒牌流局！牌山已摸完"]
-                    if tenpai_names:
-                        msg_lines.append(f"📗 听牌: {', '.join(tenpai_names)}")
-                    if noten_names:
-                        msg_lines.append(f"📕 未听: {', '.join(noten_names)}")
-                    
-                    # 显示点数变化
-                    for i in range(4):
-                        change = ryuukyoku_result['score_changes'][i]
-                        if change != 0:
-                            sign = '+' if change > 0 else ''
-                            msg_lines.append(f"  {room.players[i]}: {sign}{change}")
-                    
-                    # 显示是否连庄
-                    if ryuukyoku_result.get('renchan'):
-                        msg_lines.append(f"🔄 {room.players[room.dealer]} 连庄")
-                    else:
-                        msg_lines.append(f"➡️ 轮庄")
-                    
-                    my_new_hand = room.hands[pos]
-                    
+                    msg = self._build_ryuukyoku_msg(room, ryuukyoku_result)
                     return {
                         'action': 'mahjong_ryuukyoku',
-                        'message': '\n'.join(msg_lines),
-                        'hand': my_new_hand,
+                        'message': msg,
+                        'hand': room.hands[pos],
                         'room_data': room.get_table_data(),
                         'ryuukyoku_result': ryuukyoku_result,
                         'notify_room': {
                             'room_id': room.room_id,
-                            'message': '\n'.join(msg_lines),
+                            'message': msg,
                             'room_data': room.get_table_data()
                         }
                     }
@@ -2030,38 +1970,19 @@ class LobbyEngine:
                 if drawn is None:
                     ryuukyoku_result = room.process_ryuukyoku('exhaustive')
                     room.state = 'finished'
-                    
-                    tenpai_names = [room.players[i] for i in ryuukyoku_result['tenpai']]
-                    noten_names = [room.players[i] for i in ryuukyoku_result['noten']]
-                    
-                    msg_lines = ["过", "荒牌流局！牌山已摸完"]
-                    if tenpai_names:
-                        msg_lines.append(f"📗 听牌: {', '.join(tenpai_names)}")
-                    if noten_names:
-                        msg_lines.append(f"📕 未听: {', '.join(noten_names)}")
-                    
-                    for i in range(4):
-                        change = ryuukyoku_result['score_changes'][i]
-                        if change != 0:
-                            sign = '+' if change > 0 else ''
-                            msg_lines.append(f"  {room.players[i]}: {sign}{change}")
-                    
-                    if ryuukyoku_result.get('renchan'):
-                        msg_lines.append(f"🔄 {room.players[room.dealer]} 连庄")
-                    else:
-                        msg_lines.append(f"➡️ 轮庄")
-                    
-                    msg_lines.append("")
-                    msg_lines.append("输入 /next 开始下一局")
-                    
+                    msg = self._build_ryuukyoku_msg(room, ryuukyoku_result, prefix_lines=["过"])
+                    msg += "\n\n输入 /next 开始下一局"
+                    # notify_room message excludes "过" prefix
+                    notify_msg = self._build_ryuukyoku_msg(room, ryuukyoku_result)
+                    notify_msg += "\n\n输入 /next 开始下一局"
                     return {
                         'action': 'mahjong_ryuukyoku',
-                        'message': '\n'.join(msg_lines),
+                        'message': msg,
                         'room_data': room.get_table_data(),
                         'ryuukyoku_result': ryuukyoku_result,
                         'notify_room': {
                             'room_id': room.room_id,
-                            'message': '\n'.join(msg_lines[1:]),  # 不包含"过"
+                            'message': notify_msg,
                             'room_data': room.get_table_data()
                         }
                     }
@@ -2260,13 +2181,14 @@ class LobbyEngine:
                 if room.discards[discarder_pos][-1] == last_tile:
                     room.discards[discarder_pos].pop()
             
+            anim = all_win_animations[0] if len(all_win_animations) == 1 else all_win_animations
             return {
                 'action': 'mahjong_win',
-                'win_animation': all_win_animations[0] if len(all_win_animations) == 1 else all_win_animations,
+                'win_animation': anim,
                 'room_data': room.get_table_data(),
                 'notify_room': {
                     'room_id': room.room_id,
-                    'win_animation': all_win_animations[0] if len(all_win_animations) == 1 else all_win_animations,
+                    'win_animation': anim,
                     'room_data': room.get_table_data()
                 }
             }
@@ -2307,31 +2229,18 @@ class LobbyEngine:
             room.state = 'finished'
             room.waiting_for_action = False
             
+            anim = {
+                'winner': player_name, 'win_type': 'tsumo', 'tile': tsumo_tile,
+                'yakus': result['yakus'], 'han': result['han'], 'fu': result['fu'],
+                'score': result['score'], 'is_yakuman': result['is_yakuman']
+            }
             return {
                 'action': 'mahjong_win',
-                'win_animation': {
-                    'winner': player_name,
-                    'win_type': 'tsumo',
-                    'tile': tsumo_tile,
-                    'yakus': result['yakus'],
-                    'han': result['han'],
-                    'fu': result['fu'],
-                    'score': result['score'],
-                    'is_yakuman': result['is_yakuman']
-                },
+                'win_animation': anim,
                 'room_data': room.get_table_data(),
                 'notify_room': {
                     'room_id': room.room_id,
-                    'win_animation': {
-                        'winner': player_name,
-                        'win_type': 'tsumo',
-                        'tile': tsumo_tile,
-                        'yakus': result['yakus'],
-                        'han': result['han'],
-                        'fu': result['fu'],
-                        'score': result['score'],
-                        'is_yakuman': result['is_yakuman']
-                    },
+                    'win_animation': anim,
                     'room_data': room.get_table_data()
                 }
             }

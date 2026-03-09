@@ -60,6 +60,48 @@ class ChatServer:
         self.maintenance_thread = None
         self._load_chat_logs()
     
+    def _get_mahjong_room(self, room_id):
+        """获取麻将房间，不存在返回 None"""
+        engine = self.lobby_engine.game_engines.get('mahjong')
+        return engine.get_room(room_id) if engine else None
+
+    def _for_each_room_player(self, room, callback, exclude_player=None):
+        """遍历房间内的在线玩家，调用 callback(client, player_name, pos)"""
+        with self.lock:
+            for client, info in self.clients.items():
+                player_name = info.get('name')
+                if player_name and player_name != exclude_player:
+                    pos = room.get_position(player_name)
+                    if pos >= 0:
+                        callback(client, player_name, pos)
+
+    def _send_draw_notification(self, client, room, room_id, pos, player_name, drawn_tile):
+        """发送摸牌通知（含自操作提示和立直自动摸切）"""
+        msg = f"轮到你出牌！\n摸到: [{drawn_tile}]"
+        self_actions = []
+        if room.can_win(room.hands[pos][:-1], drawn_tile):
+            self_actions.append("可以自摸 /tsumo")
+        riichi_tiles = room.can_declare_riichi(pos)
+        if riichi_tiles:
+            self_actions.append("可以立直 /riichi <编号>")
+        for k in (room.check_self_kong(pos) or []):
+            cmd = 'ankan' if k['type'] == 'concealed' else 'kakan'
+            label = '暗杠' if k['type'] == 'concealed' else '加杠'
+            self_actions.append(f"可{label} [{k['tile']}] /{cmd}")
+        if self_actions:
+            msg += "\n" + "\n".join(self_actions)
+        self.send_to(client, {'type': 'game', 'text': msg})
+        self.send_to(client, {
+            'type': 'hand_update',
+            'hand': room.hands[pos], 'drawn': drawn_tile,
+            'tenpai_analysis': room.get_tenpai_analysis(pos)
+        })
+        self_action_data = self._build_self_action_prompt(room, pos)
+        if self_action_data:
+            self.send_to(client, {'type': 'self_action_prompt', 'actions': self_action_data})
+        if room.riichi[pos] and not (drawn_tile and room.can_win(room.hands[pos][:-1], drawn_tile)):
+            self._schedule_riichi_auto_discard(room_id, player_name)
+
     def _send_invite_notification(self, target_name, invite_data):
         """发送邀请通知给指定玩家"""
         with self.lock:
@@ -69,119 +111,52 @@ class ChatServer:
                     break
     
     def _notify_room_players(self, room_id, message, room_data, exclude_player=None):
-        """通知房间内的所有玩家"""
-        if 'mahjong' not in self.lobby_engine.game_engines:
-            return
-        
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
+        """通知房间内所有玩家（message 嵌入 room_update）"""
+        room = self._get_mahjong_room(room_id)
         if not room:
             return
-        
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if player_name and player_name != exclude_player:
-                    if player_name in [room.players[i] for i in range(4) if room.players[i]]:
-                        self.send_to(client, {
-                            'type': 'room_update',
-                            'message': message,
-                            'room_data': room_data
-                        })
+        def send(client, name, pos):
+            self.send_to(client, {'type': 'room_update', 'message': message, 'room_data': room_data})
+        self._for_each_room_player(room, send, exclude_player)
     
     def _notify_room_update(self, room_id, message, room_data, exclude_player=None, update_last=False):
-        """通知房间内的所有玩家（碰杠吃后的简单通知）
-        
-        Args:
-            update_last: 是否更新最后一行而不是新增
-        """
-        if 'mahjong' not in self.lobby_engine.game_engines:
-            return
-        
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
+        """通知房间玩家（game 消息 + room_update 分开发送）"""
+        room = self._get_mahjong_room(room_id)
         if not room:
             return
-        
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if player_name and player_name != exclude_player:
-                    pos = room.get_position(player_name)
-                    if pos >= 0:
-                        # 发送游戏消息
-                        if message:
-                            self.send_to(client, {'type': 'game', 'text': message, 'update_last': update_last})
-                        # 发送房间更新
-                        self.send_to(client, {
-                            'type': 'room_update',
-                            'room_data': room_data
-                        })
+        def send(client, name, pos):
+            if message:
+                self.send_to(client, {'type': 'game', 'text': message, 'update_last': update_last})
+            self.send_to(client, {'type': 'room_update', 'room_data': room_data})
+        self._for_each_room_player(room, send, exclude_player)
     
     def _notify_room_win_animation(self, room_id, win_animation, room_data, exclude_player=None):
-        """通知房间内的所有玩家显示胜利动画"""
-        if 'mahjong' not in self.lobby_engine.game_engines:
-            return
-        
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
+        """通知房间玩家显示胜利动画"""
+        room = self._get_mahjong_room(room_id)
         if not room:
             return
-        
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if player_name and player_name != exclude_player:
-                    pos = room.get_position(player_name)
-                    if pos >= 0:
-                        # 发送胜利动画消息
-                        if isinstance(win_animation, list):
-                            for anim in win_animation:
-                                self.send_to(client, {'type': 'win_animation', **anim})
-                        else:
-                            self.send_to(client, {'type': 'win_animation', **win_animation})
-                        # 发送房间更新
-                        if room_data:
-                            self.send_to(client, {
-                                'type': 'room_update',
-                                'room_data': room_data
-                            })
+        def send(client, name, pos):
+            anims = win_animation if isinstance(win_animation, list) else [win_animation]
+            for anim in anims:
+                self.send_to(client, {'type': 'win_animation', **anim})
+            if room_data:
+                self.send_to(client, {'type': 'room_update', 'room_data': room_data})
+        self._for_each_room_player(room, send, exclude_player)
     
     def _notify_room_players_with_hands(self, room_id, message, room_data, exclude_player=None, location=None):
-        """通知房间内的所有玩家并发送各自的手牌"""
-        if 'mahjong' not in self.lobby_engine.game_engines:
-            return
-        
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
+        """通知房间玩家并发送各自手牌"""
+        room = self._get_mahjong_room(room_id)
         if not room:
             return
-        
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if player_name and player_name != exclude_player:
-                    pos = room.get_position(player_name)
-                    if pos >= 0:
-                        # 发送房间更新
-                        self.send_to(client, {
-                            'type': 'room_update',
-                            'message': message,
-                            'room_data': room_data
-                        })
-                        # 发送位置更新
-                        if location:
-                            self.send_to(client, {
-                                'type': 'location_update',
-                                'location': location
-                            })
-                        # 发送该玩家的手牌和听牌分析
-                        tenpai_analysis = room.get_tenpai_analysis(pos)
-                        self.send_to(client, {
-                            'type': 'hand_update',
-                            'hand': room.hands[pos],
-                            'tenpai_analysis': tenpai_analysis
-                        })
+        def send(client, name, pos):
+            self.send_to(client, {'type': 'room_update', 'message': message, 'room_data': room_data})
+            if location:
+                self.send_to(client, {'type': 'location_update', 'location': location})
+            self.send_to(client, {
+                'type': 'hand_update', 'hand': room.hands[pos],
+                'tenpai_analysis': room.get_tenpai_analysis(pos)
+            })
+        self._for_each_room_player(room, send, exclude_player)
     
     def _build_self_action_prompt(self, room, pos):
         """构建自摸/立直/暗杠/加杠的操作提示数据"""
@@ -189,156 +164,63 @@ class ChatServer:
         hand = room.hands[pos]
         if not hand:
             return actions
-        
         drawn_tile = hand[-1] if len(hand) % 3 == 2 else None
-        
-        # 检查能否自摸
         if drawn_tile and room.can_win(hand[:-1], drawn_tile):
             actions['tsumo'] = True
-        
-        # 检查能否立直
         riichi_tiles = room.can_declare_riichi(pos)
         if riichi_tiles:
             actions['riichi'] = riichi_tiles
-        
-        # 检查能否暗杠/加杠
-        kong_opts = room.check_self_kong(pos)
-        if kong_opts:
-            concealed = [k for k in kong_opts if k['type'] == 'concealed']
-            added = [k for k in kong_opts if k['type'] == 'added']
-            if concealed:
-                actions['ankan'] = concealed
-            if added:
-                actions['kakan'] = added
-        
+        for k in (room.check_self_kong(pos) or []):
+            key = 'ankan' if k['type'] == 'concealed' else 'kakan'
+            actions.setdefault(key, []).append(k)
         return actions
     
-    def _notify_room_discard(self, room_id, discard_info, room_data, exclude_player=None):
+    def _broadcast_discard(self, room_id, discard_info, room_data, exclude_player=None):
         """通知房间内玩家有人打牌，检查吃碰杠，给下家发摸到的牌"""
-        if 'mahjong' not in self.lobby_engine.game_engines:
-            return
-        
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
+        room = self._get_mahjong_room(room_id)
         if not room:
             return
-        
+
         discard_player = discard_info.get('player', '')
         tile = discard_info.get('tile', '')
         next_player = discard_info.get('next_player', '')
         drawn_tile = discard_info.get('drawn_tile')
         waiting_action = discard_info.get('waiting_action', False)
-        is_riichi = discard_info.get('is_riichi', False)  # 是否是立直打牌
-        
+        is_riichi = discard_info.get('is_riichi', False)
+
+        action_hint = ""
+        if waiting_action and hasattr(room, 'action_players') and room.action_players:
+            action_hint = f" [等待操作({len(room.action_players)})]"
+        if discard_player:
+            prefix = f"{discard_player} 立直！打出" if is_riichi else f"{discard_player} 打出"
+            base_msg = f"{prefix} [{tile}]，轮到 {next_player}{action_hint}"
+        else:
+            base_msg = None
+
         with self.lock:
             for client, info in self.clients.items():
                 player_name = info.get('name')
                 if player_name and player_name != exclude_player:
                     pos = room.get_position(player_name)
-                    if pos >= 0:
-                        # 发送房间更新（包含弃牌堆）
-                        self.send_to(client, {
-                            'type': 'room_update',
-                            'room_data': room_data
-                        })
-                        
-                        # 检查该玩家是否可以吃碰杠
-                        actions = {}
-                        if tile:
-                            actions = room.check_actions(pos, tile)
-                        
-                        # 统一消息格式：所有人都看到相同的基础信息
-                        action_hint = ""
+                    if pos < 0:
+                        continue
+                    self.send_to(client, {'type': 'room_update', 'room_data': room_data})
+                    actions = room.check_actions(pos, tile) if tile else {}
+                    if base_msg:
+                        self.send_to(client, {'type': 'game', 'text': base_msg})
+
+                    if player_name == next_player:
                         if waiting_action:
-                            action_count = len(room.action_players) if hasattr(room, 'action_players') else 0
-                            if action_count > 0:
-                                action_hint = f" [等待操作({action_count})]"
-                        
-                        # 基础消息：谁打了什么牌，轮到谁
-                        if discard_player:
-                            if is_riichi:
-                                base_msg = f"{discard_player} 立直！打出 [{tile}]，轮到 {next_player}{action_hint}"
-                            else:
-                                base_msg = f"{discard_player} 打出 [{tile}]，轮到 {next_player}{action_hint}"
-                            self.send_to(client, {'type': 'game', 'text': base_msg})
-                        
-                        # 如果是下家
-                        if player_name == next_player:
-                            if waiting_action:
-                                # 等待吃碰杠状态，下家也可能有操作
-                                # 发送可用操作（吃碰杠）
-                                if actions:
-                                    self.send_to(client, {
-                                        'type': 'action_prompt',
-                                        'actions': actions,
-                                        'tile': tile,
-                                        'from_player': discard_player
-                                    })
-                            elif drawn_tile:
-                                # 正常摸牌
-                                msg = f"轮到你出牌！\n摸到: [{drawn_tile}]"
-                                
-                                # 检查自摸和暗杠
-                                self_actions = []
-                                # 检查能否自摸
-                                if room.can_win(room.hands[pos][:-1], drawn_tile):
-                                    self_actions.append("可以自摸 /tsumo")
-                                # 检查能否立直
-                                riichi_tiles = room.can_declare_riichi(pos)
-                                if riichi_tiles:
-                                    self_actions.append("可以立直 /riichi <编号>")
-                                # 检查能否暗杠/加杠
-                                kong_opts = room.check_self_kong(pos)
-                                if kong_opts:
-                                    for k in kong_opts:
-                                        if k['type'] == 'concealed':
-                                            self_actions.append(f"可暗杠 [{k['tile']}] /ankan")
-                                        elif k['type'] == 'added':
-                                            self_actions.append(f"可加杠 [{k['tile']}] /kakan")
-                                
-                                if self_actions:
-                                    msg += "\n" + "\n".join(self_actions)
-                                
-                                self.send_to(client, {'type': 'game', 'text': msg})
-                                # 更新手牌（包含新摸的牌和听牌分析）
-                                tenpai_analysis = room.get_tenpai_analysis(pos)
-                                self.send_to(client, {
-                                    'type': 'hand_update',
-                                    'hand': room.hands[pos],
-                                    'drawn': drawn_tile,
-                                    'tenpai_analysis': tenpai_analysis
-                                })
-                                
-                                # 发送自操作提示（立直/暗杠/加杠/自摸）
-                                self_action_data = self._build_self_action_prompt(room, pos)
-                                if self_action_data:
-                                    self.send_to(client, {
-                                        'type': 'self_action_prompt',
-                                        'actions': self_action_data
-                                    })
-                                
-                                # 如果玩家已立直，安排自动摸切（但如果能自摸就不自动摸切）
-                                if room.riichi[pos]:
-                                    # 检查是否能自摸，能自摸则不自动摸切
-                                    can_tsumo = room.can_win(room.hands[pos][:-1], drawn_tile) if drawn_tile else False
-                                    if not can_tsumo:
-                                        self._schedule_riichi_auto_discard(room_id, player_name)
-                        else:
-                            # 非下家可以碰杠胡（优先级高于吃）
-                            if actions and ('pong' in actions or 'kong' in actions or 'win' in actions):
-                                filtered_actions = {k: v for k, v in actions.items() if k in ['pong', 'kong', 'win']}
-                                self.send_to(client, {
-                                    'type': 'action_prompt',
-                                    'actions': filtered_actions,
-                                    'tile': tile,
-                                    'from_player': discard_player
-                                })
-        
-        # 检查下家是否是机器人，如果是则启动自动打牌
+                            if actions:
+                                self.send_to(client, {'type': 'action_prompt', 'actions': actions, 'tile': tile, 'from_player': discard_player})
+                        elif drawn_tile:
+                            self._send_draw_notification(client, room, room_id, pos, player_name, drawn_tile)
+                    elif actions and any(k in actions for k in ('pong', 'kong', 'win')):
+                        filtered = {k: v for k, v in actions.items() if k in ('pong', 'kong', 'win')}
+                        self.send_to(client, {'type': 'action_prompt', 'actions': filtered, 'tile': tile, 'from_player': discard_player})
+
         if next_player and room.is_bot(next_player) and not waiting_action:
             self._schedule_bot_play(room_id, next_player)
-        
-        # 如果有等待操作，检查是否有bot需要pass
         if waiting_action and hasattr(room, 'action_players') and room.action_players:
             self._schedule_bot_pass(room_id, tile, discard_player)
     
@@ -410,19 +292,16 @@ class ChatServer:
             # 检查是否有人可以吃碰杠
             if room.waiting_for_action:
                 discard_info = {
+                    'player': player_name,
                     'tile': tile_to_discard,
                     'next_player': next_player,
                     'drawn_tile': None,
                     'waiting_action': True
                 }
                 room_data = room.get_table_data()
-                # 广播消息给所有玩家（类似机器人打牌）
-                self._broadcast_bot_discard(room_id, player_name, discard_info, room_data)
+                self._broadcast_discard(room_id, discard_info, room_data)
             else:
-                # 下家摸牌
                 drawn = room.draw_tile(next_pos)
-                
-                # 检查是否荒牌流局
                 if drawn is None:
                     ryuukyoku_result = room.process_ryuukyoku('exhaustive')
                     room.state = 'finished'
@@ -430,13 +309,14 @@ class ChatServer:
                     return
                 
                 discard_info = {
+                    'player': player_name,
                     'tile': tile_to_discard,
                     'next_player': next_player,
                     'drawn_tile': drawn,
                     'waiting_action': False
                 }
                 room_data = room.get_table_data()
-                self._broadcast_bot_discard(room_id, player_name, discard_info, room_data)
+                self._broadcast_discard(room_id, discard_info, room_data)
         except Exception as e:
             print(f"[立直 Error] {player_name} 自动摸切出错: {e}")
             import traceback
@@ -523,37 +403,31 @@ class ChatServer:
             # 检查是否有人可以吃碰杠
             if room.waiting_for_action:
                 discard_info = {
+                    'player': bot_name,
                     'tile': tile_to_discard,
                     'next_player': next_player,
                     'drawn_tile': None,
                     'waiting_action': True
                 }
                 room_data = room.get_table_data()
-                # 广播消息给所有玩家
-                self._broadcast_bot_discard(room_id, bot_name, discard_info, room_data)
+                self._broadcast_discard(room_id, discard_info, room_data)
             else:
-                # 下家摸牌
                 drawn = room.draw_tile(next_pos)
-                
-                # 检查是否荒牌流局
                 if drawn is None:
-                    # 荒牌流局
                     ryuukyoku_result = room.process_ryuukyoku('exhaustive')
                     room.state = 'finished'
-                    
-                    # 广播流局消息
                     self._broadcast_ryuukyoku(room_id, ryuukyoku_result, bot_name, tile_to_discard)
                     return
                 
                 discard_info = {
+                    'player': bot_name,
                     'tile': tile_to_discard,
                     'next_player': next_player,
                     'drawn_tile': drawn,
                     'waiting_action': False
                 }
                 room_data = room.get_table_data()
-                # 广播消息给所有玩家
-                self._broadcast_bot_discard(room_id, bot_name, discard_info, room_data)
+                self._broadcast_discard(room_id, discard_info, room_data)
         except Exception as e:
             print(f"[Bot Error] {bot_name} 自动打牌出错: {e}")
             import traceback
@@ -663,6 +537,7 @@ class ChatServer:
                 return
             
             discard_info = {
+                'player': bot_name,
                 'tile': discard_tile,
                 'next_player': next_player,
                 'drawn_tile': drawn,
@@ -670,6 +545,7 @@ class ChatServer:
             }
         else:
             discard_info = {
+                'player': bot_name,
                 'tile': discard_tile,
                 'next_player': next_player,
                 'drawn_tile': None,
@@ -677,24 +553,18 @@ class ChatServer:
             }
         
         room_data = room.get_table_data()
-        self._broadcast_bot_discard(room_id, bot_name, discard_info, room_data)
+        self._broadcast_discard(room_id, discard_info, room_data)
 
     def _broadcast_ryuukyoku(self, room_id, ryuukyoku_result, last_discard_player=None, last_tile=None):
         """广播流局消息"""
-        if 'mahjong' not in self.lobby_engine.game_engines:
-            return
-        
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
+        room = self._get_mahjong_room(room_id)
         if not room:
             return
         
-        # 取消该房间的机器人定时器
         if room_id in self.bot_timers:
             self.bot_timers[room_id].cancel()
             del self.bot_timers[room_id]
         
-        # 构建流局消息
         tenpai_names = [room.players[i] for i in ryuukyoku_result['tenpai']]
         noten_names = [room.players[i] for i in ryuukyoku_result['noten']]
         
@@ -706,162 +576,19 @@ class ChatServer:
             msg_lines.append(f"📗 听牌: {', '.join(tenpai_names)}")
         if noten_names:
             msg_lines.append(f"📕 未听: {', '.join(noten_names)}")
-        
-        # 显示点数变化
         for i in range(4):
             change = ryuukyoku_result['score_changes'][i]
             if change != 0:
                 sign = '+' if change > 0 else ''
                 msg_lines.append(f"  {room.players[i]}: {sign}{change}")
-        
-        # 显示是否连庄
         if ryuukyoku_result.get('renchan'):
             msg_lines.append(f"🔄 {room.players[room.dealer]} 连庄")
         else:
-            msg_lines.append(f"➡️ 轮庄")
+            msg_lines.append("➡️ 轮庄")
+        msg_lines += ["", "输入 /next 开始下一局", "输入 /back 返回上一级"]
         
-        msg_lines.append("")
-        msg_lines.append("输入 /next 开始下一局")
-        msg_lines.append("输入 /back 返回上一级")
-        
-        message = '\n'.join(msg_lines)
-        room_data = room.get_table_data()
-        
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if not player_name:
-                    continue
-                
-                pos = room.get_position(player_name)
-                if pos < 0:
-                    continue
-                
-                # 发送流局消息
-                self.send_to(client, {'type': 'game', 'text': message})
-                # 发送房间更新
-                self.send_to(client, {
-                    'type': 'room_update',
-                    'room_data': room_data
-                })
+        self._notify_room_update(room_id, '\n'.join(msg_lines), room.get_table_data())
     
-    def _broadcast_bot_discard(self, room_id, bot_name, discard_info, room_data):
-        """广播机器人打牌消息"""
-        if 'mahjong' not in self.lobby_engine.game_engines:
-            return
-        
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
-        if not room:
-            return
-        
-        tile = discard_info.get('tile', '')
-        next_player = discard_info.get('next_player', '')
-        drawn_tile = discard_info.get('drawn_tile')
-        waiting_action = discard_info.get('waiting_action', False)
-        
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if not player_name:
-                    continue
-                    
-                pos = room.get_position(player_name)
-                if pos < 0:
-                    continue
-                
-                # 发送房间更新
-                self.send_to(client, {
-                    'type': 'room_update',
-                    'room_data': room_data
-                })
-                
-                # 检查是否可以吃碰杠
-                actions = {}
-                if tile:
-                    actions = room.check_actions(pos, tile)
-                
-                # 消息提示
-                action_hint = ""
-                if waiting_action:
-                    action_count = len(room.action_players) if hasattr(room, 'action_players') else 0
-                    if action_count > 0:
-                        action_hint = f" [等待操作({action_count})]"
-                
-                base_msg = f"{bot_name} 打出 [{tile}]，轮到 {next_player}{action_hint}"
-                self.send_to(client, {'type': 'game', 'text': base_msg})
-                
-                # 如果是下家
-                if player_name == next_player:
-                    if waiting_action:
-                        if actions:
-                            self.send_to(client, {
-                                'type': 'action_prompt',
-                                'actions': actions,
-                                'tile': tile,
-                                'from_player': bot_name
-                            })
-                    elif drawn_tile:
-                        msg = f"轮到你出牌！\n摸到: [{drawn_tile}]"
-                        self_actions = []
-                        if room.can_win(room.hands[pos][:-1], drawn_tile):
-                            self_actions.append("可以自摸 /tsumo")
-                        # 检查能否立直
-                        riichi_tiles = room.can_declare_riichi(pos)
-                        if riichi_tiles:
-                            self_actions.append("可以立直 /riichi <编号>")
-                        kong_opts = room.check_self_kong(pos)
-                        if kong_opts:
-                            for k in kong_opts:
-                                if k['type'] == 'concealed':
-                                    self_actions.append(f"可暗杠 [{k['tile']}] /ankan")
-                                elif k['type'] == 'added':
-                                    self_actions.append(f"可加杠 [{k['tile']}] /kakan")
-                        
-                        if self_actions:
-                            msg += "\n" + "\n".join(self_actions)
-                        
-                        self.send_to(client, {'type': 'game', 'text': msg})
-                        tenpai_analysis = room.get_tenpai_analysis(pos)
-                        self.send_to(client, {
-                            'type': 'hand_update',
-                            'hand': room.hands[pos],
-                            'drawn': drawn_tile,
-                            'tenpai_analysis': tenpai_analysis
-                        })
-                        
-                        # 发送自操作提示（立直/暗杠/加杠/自摸）
-                        self_action_data = self._build_self_action_prompt(room, pos)
-                        if self_action_data:
-                            self.send_to(client, {
-                                'type': 'self_action_prompt',
-                                'actions': self_action_data
-                            })
-                        
-                        # 如果玩家已立直，安排自动摸切（但如果能自摸就不自动摸切）
-                        if room.riichi[pos]:
-                            # 检查是否能自摸，能自摸则不自动摸切
-                            can_tsumo = room.can_win(room.hands[pos][:-1], drawn_tile) if drawn_tile else False
-                            if not can_tsumo:
-                                self._schedule_riichi_auto_discard(room_id, player_name)
-                else:
-                    if actions and ('pong' in actions or 'kong' in actions or 'win' in actions):
-                        filtered_actions = {k: v for k, v in actions.items() if k in ['pong', 'kong', 'win']}
-                        self.send_to(client, {
-                            'type': 'action_prompt',
-                            'actions': filtered_actions,
-                            'tile': tile,
-                            'from_player': bot_name
-                        })
-        
-        # 检查下家是否也是机器人
-        if next_player and room.is_bot(next_player) and not waiting_action:
-            self._schedule_bot_play(room_id, next_player)
-        
-        # 如果有等待操作，检查是否所有能操作的玩家都是bot，让bot自动pass
-        if waiting_action and hasattr(room, 'action_players') and room.action_players:
-            self._schedule_bot_pass(room_id, tile, bot_name)
-
     def _schedule_bot_pass(self, room_id, tile, from_player, delay=0.8):
         """安排机器人自动pass"""
         timer = threading.Timer(delay, self._bot_auto_pass, args=[room_id, tile, from_player])
@@ -954,16 +681,13 @@ class ChatServer:
     
     def _bot_do_ron(self, room_id, bot_name, pos, tile):
         """机器人执行荣和"""
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
+        room = self._get_mahjong_room(room_id)
         if not room:
             return
         
         discarder_pos = room.last_discarder
         discarder_name = room.players[discarder_pos] if discarder_pos is not None else "?"
-        
         result = room.process_win(pos, tile, is_tsumo=False, loser_pos=discarder_pos)
-        
         if not result.get('success'):
             return
         
@@ -971,171 +695,53 @@ class ChatServer:
         room.waiting_for_action = False
         room.action_players = []
         
-        # 从弃牌堆移除
         if discarder_pos is not None and room.discards[discarder_pos]:
             from games.mahjong.game_data import normalize_tile
-            if room.discards[discarder_pos] and normalize_tile(room.discards[discarder_pos][-1]) == normalize_tile(tile):
+            if normalize_tile(room.discards[discarder_pos][-1]) == normalize_tile(tile):
                 room.discards[discarder_pos].pop()
         
         room_data = room.get_table_data()
-        
-        # 发送胜利动画消息
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if not player_name:
-                    continue
-                client_pos = room.get_position(player_name)
-                if client_pos < 0:
-                    continue
-                self.send_to(client, {
-                    'type': 'win_animation',
-                    'winner': bot_name,
-                    'win_type': 'ron',
-                    'tile': tile,
-                    'loser': discarder_name,
-                    'yakus': result['yakus'],
-                    'han': result['han'],
-                    'fu': result['fu'],
-                    'score': result['score'],
-                    'is_yakuman': result['is_yakuman']
-                })
-                self.send_to(client, {'type': 'room_update', 'room_data': room_data})
+        self._notify_room_win_animation(room_id, {
+            'winner': bot_name, 'win_type': 'ron', 'tile': tile,
+            'loser': discarder_name, 'yakus': result['yakus'],
+            'han': result['han'], 'fu': result['fu'],
+            'score': result['score'], 'is_yakuman': result['is_yakuman']
+        }, room_data)
     
     def _bot_do_pong(self, room_id, bot_name, pos, tile):
         """机器人执行碰"""
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
-        if not room:
+        room = self._get_mahjong_room(room_id)
+        if not room or not room.do_pong(pos, tile):
             return
-        
-        if not room.do_pong(pos, tile):
-            return
-        
-        message = f"{bot_name} 碰 [{tile}]"
-        room_data = room.get_table_data()
-        
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if not player_name:
-                    continue
-                client_pos = room.get_position(player_name)
-                if client_pos < 0:
-                    continue
-                self.send_to(client, {'type': 'game', 'text': message})
-                self.send_to(client, {'type': 'room_update', 'room_data': room_data})
-        
-        # 碰完后bot需要打牌
+        self._notify_room_update(room_id, f"{bot_name} 碰 [{tile}]", room.get_table_data())
         self._schedule_bot_play(room_id, bot_name, delay=0.8)
     
     def _bot_do_kong(self, room_id, bot_name, pos, tile):
         """机器人执行明杠"""
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
+        room = self._get_mahjong_room(room_id)
         if not room:
             return
-        
         success, need_draw = room.do_kong(pos, tile)
         if not success:
             return
-        
         message = f"{bot_name} 杠 [{tile}]"
-        
-        # 杠完需要补牌
         if need_draw:
             drawn = room.draw_tile(pos, from_dead_wall=True)
             if drawn:
                 message += "，岭上摸牌"
-        
-        room_data = room.get_table_data()
-        
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if not player_name:
-                    continue
-                client_pos = room.get_position(player_name)
-                if client_pos < 0:
-                    continue
-                self.send_to(client, {'type': 'game', 'text': message})
-                self.send_to(client, {'type': 'room_update', 'room_data': room_data})
-        
-        # 杠完后bot需要打牌
+        self._notify_room_update(room_id, message, room.get_table_data())
         self._schedule_bot_play(room_id, bot_name, delay=0.8)
 
     def _notify_after_all_pass(self, room_id, next_player, drawn_tile, room_data):
         """通知所有人pass后的状态"""
-        if 'mahjong' not in self.lobby_engine.game_engines:
-            return
-        
-        engine = self.lobby_engine.game_engines['mahjong']
-        room = engine.get_room(room_id)
+        room = self._get_mahjong_room(room_id)
         if not room:
             return
-        
-        with self.lock:
-            for client, info in self.clients.items():
-                player_name = info.get('name')
-                if not player_name:
-                    continue
-                
-                pos = room.get_position(player_name)
-                if pos < 0:
-                    continue
-                
-                # 发送房间更新
-                self.send_to(client, {
-                    'type': 'room_update',
-                    'room_data': room_data
-                })
-                
-                # 如果是下家，通知摸牌
-                if player_name == next_player:
-                    msg = f"轮到你出牌！\n摸到: [{drawn_tile}]"
-                    
-                    # 检查自摸和暗杠
-                    self_actions = []
-                    if room.can_win(room.hands[pos][:-1], drawn_tile):
-                        self_actions.append("可以自摸 /tsumo")
-                    # 检查能否立直
-                    riichi_tiles = room.can_declare_riichi(pos)
-                    if riichi_tiles:
-                        self_actions.append("可以立直 /riichi <编号>")
-                    kong_opts = room.check_self_kong(pos)
-                    if kong_opts:
-                        for k in kong_opts:
-                            if k['type'] == 'concealed':
-                                self_actions.append(f"可暗杠 [{k['tile']}] /ankan")
-                            elif k['type'] == 'added':
-                                self_actions.append(f"可加杠 [{k['tile']}] /kakan")
-                    
-                    if self_actions:
-                        msg += "\n" + "\n".join(self_actions)
-                    
-                    self.send_to(client, {'type': 'game', 'text': msg})
-                    tenpai_analysis = room.get_tenpai_analysis(pos)
-                    self.send_to(client, {
-                        'type': 'hand_update',
-                        'hand': room.hands[pos],
-                        'drawn': drawn_tile,
-                        'tenpai_analysis': tenpai_analysis
-                    })
-                    
-                    # 发送自操作提示（立直/暗杠/加杠/自摸）
-                    self_action_data = self._build_self_action_prompt(room, pos)
-                    if self_action_data:
-                        self.send_to(client, {
-                            'type': 'self_action_prompt',
-                            'actions': self_action_data
-                        })
-                    
-                    # 如果玩家已立直，安排自动摸切（但如果能自摸就不自动摸切）
-                    if room.riichi[pos]:
-                        # 检查是否能自摸，能自摸则不自动摸切
-                        can_tsumo = room.can_win(room.hands[pos][:-1], drawn_tile) if drawn_tile else False
-                        if not can_tsumo:
-                            self._schedule_riichi_auto_discard(room_id, player_name)
+        def send(client, player_name, pos):
+            self.send_to(client, {'type': 'room_update', 'room_data': room_data})
+            if player_name == next_player:
+                self._send_draw_notification(client, room, room_id, pos, player_name, drawn_tile)
+        self._for_each_room_player(room, send)
 
     def _get_log_file(self, channel):
         """获取当前日期的聊天记录文件路径"""
@@ -1474,7 +1080,7 @@ class ChatServer:
             return
         
         name = text
-        exists = PlayerManager.check_player_exists(name)
+        exists = PlayerManager.player_exists(name)
         
         with self.lock:
             self.clients[client_socket]['name'] = name
@@ -1499,7 +1105,7 @@ class ChatServer:
         name, password = parts[0], parts[1]
         
         # 检查用户是否存在
-        if not PlayerManager.check_player_exists(name):
+        if not PlayerManager.player_exists(name):
             self.send_to(client_socket, {
                 'type': 'login_prompt',
                 'text': f'用户 {name} 不存在\n请输入用户名：'
@@ -1626,6 +1232,23 @@ class ChatServer:
         else:
             self.send_to(client_socket, {'type': 'login_prompt', 'text': '密码错误，请重试（/back 返回）：'})
 
+    def _send_result_fields(self, client_socket, result, **extra_msg_fields):
+        """发送result中常见字段: message, hand, room_data, location"""
+        if result.get('message'):
+            msg_data = {'type': 'game', 'text': result['message']}
+            msg_data.update(extra_msg_fields)
+            self.send_to(client_socket, msg_data)
+        if 'hand' in result:
+            hand_data = {'type': 'hand_update', 'hand': result['hand']}
+            for key in ('drawn', 'tenpai_analysis', 'need_discard'):
+                if key in result:
+                    hand_data[key] = result[key]
+            self.send_to(client_socket, hand_data)
+        if 'room_data' in result:
+            self.send_to(client_socket, {'type': 'room_update', 'room_data': result['room_data']})
+        if 'location' in result:
+            self.send_to(client_socket, {'type': 'location_update', 'location': result['location']})
+
     def _handle_playing(self, client_socket, msg):
         with self.lock:
             name = self.clients[client_socket]['name']
@@ -1674,20 +1297,7 @@ class ChatServer:
                         self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
                         self.send_to(client_socket, {'type': 'action', 'action': 'exit'})
                     elif action == 'mahjong_room_update':
-                        # 麻将房间更新
-                        self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
-                        # 发送位置更新
-                        if 'location' in result:
-                            self.send_to(client_socket, {
-                                'type': 'location_update',
-                                'location': result.get('location')
-                            })
-                        # 通知房间内其他玩家
+                        self._send_result_fields(client_socket, result)
                         if 'notify_room' in result:
                             notify = result['notify_room']
                             self._notify_room_players(
@@ -1699,14 +1309,7 @@ class ChatServer:
                         PlayerManager.save_player_data(name, player_data)
                         self.send_player_status(client_socket, player_data)
                     elif action == 'mahjong_bot_join':
-                        # 机器人加入房间
-                        self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
-                        # 通知房间内其他玩家
+                        self._send_result_fields(client_socket, result)
                         if 'notify_room' in result:
                             notify = result['notify_room']
                             self._notify_room_players(
@@ -1737,28 +1340,7 @@ class ChatServer:
                         PlayerManager.save_player_data(name, player_data)
                         self.send_player_status(client_socket, player_data)
                     elif action == 'mahjong_game_start':
-                        # 麻将游戏开始
-                        self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
-                        # 发送位置更新
-                        if 'location' in result:
-                            self.send_to(client_socket, {
-                                'type': 'location_update',
-                                'location': result.get('location')
-                            })
-                        # 发送手牌给房主（包含庄家的第14张牌标记和听牌分析）
-                        if 'hand' in result:
-                            self.send_to(client_socket, {
-                                'type': 'hand_update',
-                                'hand': result['hand'],
-                                'drawn': result.get('drawn'),  # 庄家的第14张牌
-                                'tenpai_analysis': result.get('tenpai_analysis')
-                            })
-                        # 通知房间内其他玩家并发送他们的手牌
+                        self._send_result_fields(client_socket, result)
                         if 'notify_room' in result:
                             notify = result['notify_room']
                             self._notify_room_players_with_hands(
@@ -1779,63 +1361,20 @@ class ChatServer:
                                     self._schedule_bot_play(room_id, dealer_name)
                         PlayerManager.save_player_data(name, player_data)
                     elif action == 'mahjong_hand_update':
-                        # 手牌更新
-                        if result.get('message'):
-                            self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        if 'hand' in result:
-                            self.send_to(client_socket, {
-                                'type': 'hand_update',
-                                'hand': result['hand'],
-                                'tenpai_analysis': result.get('tenpai_analysis')
-                            })
-                        if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
+                        self._send_result_fields(client_socket, result)
                     elif action == 'mahjong_discard':
-                        # 打牌
-                        if result.get('message'):
-                            self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        # 更新打牌者的手牌
-                        if 'hand' in result:
-                            self.send_to(client_socket, {
-                                'type': 'hand_update',
-                                'hand': result['hand'],
-                                'tenpai_analysis': result.get('tenpai_analysis')
-                            })
-                        if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
+                        self._send_result_fields(client_socket, result)
                         # 通知其他玩家并给下家发摸到的牌
                         if 'notify_room' in result:
                             notify = result['notify_room']
-                            self._notify_room_discard(
+                            self._broadcast_discard(
                                 notify['room_id'],
                                 notify.get('discard_info', {}),
                                 notify.get('room_data'),
                                 exclude_player=name
                             )
                     elif action in ['mahjong_pong', 'mahjong_kong', 'mahjong_chow']:
-                        # 碰、杠、吃操作
-                        if result.get('message'):
-                            self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        # 更新手牌（含听牌分析）
-                        if 'hand' in result:
-                            self.send_to(client_socket, {
-                                'type': 'hand_update',
-                                'hand': result['hand'],
-                                'drawn': result.get('drawn'),  # 杠后补牌
-                                'tenpai_analysis': result.get('tenpai_analysis'),
-                                'need_discard': result.get('need_discard', False)  # 吃碰后需要出牌
-                            })
-                        if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
+                        self._send_result_fields(client_socket, result)
                         # 通知房间内其他玩家
                         if 'notify_room' in result:
                             notify = result['notify_room']
@@ -1871,65 +1410,15 @@ class ChatServer:
                             
                             # 如果下家就是执行pass的玩家自己，直接发送摸牌通知
                             if next_player == name and drawn_tile:
-                                # 获取房间信息以检查自摸和暗杠
                                 engine = self.lobby_engine.game_engines.get('mahjong')
                                 room = engine.get_room(notify['room_id']) if engine else None
-                                
-                                msg = f"轮到你出牌！\n摸到: [{drawn_tile}]"
-                                hand_to_send = None
-                                
                                 if room:
                                     pos = room.get_position(name)
                                     if pos >= 0:
-                                        hand_to_send = room.hands[pos]
-                                        # 检查自摸和暗杠
-                                        self_actions = []
-                                        if room.can_win(room.hands[pos][:-1], drawn_tile):
-                                            self_actions.append("可以自摸 /tsumo")
-                                        # 检查能否立直
-                                        riichi_tiles = room.can_declare_riichi(pos)
-                                        if riichi_tiles:
-                                            self_actions.append("可以立直 /riichi <编号>")
-                                        kong_opts = room.check_self_kong(pos)
-                                        if kong_opts:
-                                            for k in kong_opts:
-                                                if k['type'] == 'concealed':
-                                                    self_actions.append(f"可暗杠 [{k['tile']}] /ankan")
-                                                elif k['type'] == 'added':
-                                                    self_actions.append(f"可加杠 [{k['tile']}] /kakan")
-                                        
-                                        if self_actions:
-                                            msg += "\n" + "\n".join(self_actions)
-                                
-                                # 始终发送摸牌提示
-                                self.send_to(client_socket, {'type': 'game', 'text': msg})
-                                # 如果获取到了手牌，发送手牌更新
-                                if hand_to_send:
-                                    tenpai_analysis = room.get_tenpai_analysis(pos)
-                                    self.send_to(client_socket, {
-                                        'type': 'hand_update',
-                                        'hand': hand_to_send,
-                                        'drawn': drawn_tile,
-                                        'tenpai_analysis': tenpai_analysis
-                                    })
-                                    
-                                    # 发送自操作提示（立直/暗杠/加杠/自摸）
-                                    self_action_data = self._build_self_action_prompt(room, pos)
-                                    if self_action_data:
-                                        self.send_to(client_socket, {
-                                            'type': 'self_action_prompt',
-                                            'actions': self_action_data
-                                        })
-                                    
-                                    # 如果玩家已立直，安排自动摸切（但如果能自摸就不自动摸切）
-                                    if room and pos >= 0 and room.riichi[pos]:
-                                        # 检查是否能自摸，能自摸则不自动摸切
-                                        can_tsumo = room.can_win(room.hands[pos][:-1], drawn_tile) if drawn_tile else False
-                                        if not can_tsumo:
-                                            self._schedule_riichi_auto_discard(notify['room_id'], name)
+                                        self._send_draw_notification(client_socket, room, notify['room_id'], pos, name, drawn_tile)
                             
                             # 通知房间内其他玩家（不排除下家，但下家如果是自己已经处理过了）
-                            self._notify_room_discard(
+                            self._broadcast_discard(
                                 notify['room_id'],
                                 discard_info,
                                 notify.get('room_data'),
@@ -1950,20 +1439,7 @@ class ChatServer:
                                 update_last=True
                             )
                     elif action == 'mahjong_ryuukyoku':
-                        # 流局
-                        if result.get('message'):
-                            self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        if 'hand' in result:
-                            self.send_to(client_socket, {
-                                'type': 'hand_update',
-                                'hand': result['hand'],
-                                'tenpai_analysis': result.get('tenpai_analysis')
-                            })
-                        if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
+                        self._send_result_fields(client_socket, result)
                         # 通知房间所有人
                         if 'notify_room' in result:
                             notify = result['notify_room']
@@ -1974,49 +1450,22 @@ class ChatServer:
                                 exclude_player=name
                             )
                     elif action == 'mahjong_win':
-                        # 胡牌！发送 win_animation 消息
-                        if 'win_animation' in result:
-                            win_anim = result['win_animation']
-                            if isinstance(win_anim, list):
-                                # 多人和牌
-                                for anim in win_anim:
-                                    self.send_to(client_socket, {'type': 'win_animation', **anim})
-                            else:
-                                self.send_to(client_socket, {'type': 'win_animation', **win_anim})
+                        win_anim = result.get('win_animation')
+                        if win_anim:
+                            anims = win_anim if isinstance(win_anim, list) else [win_anim]
+                            for anim in anims:
+                                self.send_to(client_socket, {'type': 'win_animation', **anim})
                         if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
-                        # 通知房间其他玩家
+                            self.send_to(client_socket, {'type': 'room_update', 'room_data': result['room_data']})
                         if 'notify_room' in result:
                             notify = result['notify_room']
                             if 'win_animation' in notify:
-                                win_anim = notify['win_animation']
-                                # 广播给房间其他玩家
                                 self._notify_room_win_animation(
-                                    notify['room_id'],
-                                    win_anim,
-                                    notify.get('room_data'),
-                                    exclude_player=name
+                                    notify['room_id'], notify['win_animation'],
+                                    notify.get('room_data'), exclude_player=name
                                 )
                     elif action in ['mahjong_riichi', 'mahjong_ankan', 'mahjong_kakan', 'mahjong_tsumo', 'mahjong_ron', 'mahjong_chankan']:
-                        # 立直、暗杠、加杠、自摸、荣和、抢杠
-                        if result.get('message'):
-                            self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        # 更新手牌（含听牌分析和岭上牌）
-                        if 'hand' in result:
-                            self.send_to(client_socket, {
-                                'type': 'hand_update',
-                                'hand': result['hand'],
-                                'drawn': result.get('drawn'),
-                                'tenpai_analysis': result.get('tenpai_analysis')
-                            })
-                        if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
+                        self._send_result_fields(client_socket, result)
                         # 通知房间内其他玩家
                         if 'notify_room' in result:
                             notify = result['notify_room']
@@ -2037,13 +1486,7 @@ class ChatServer:
                                     'text': f"你从岭上摸到: {notify['draw_tile']}"
                                 })
                     elif action == 'location_update':
-                        # 位置更新（返回上一级等）
-                        if result.get('message'):
-                            self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        self.send_to(client_socket, {
-                            'type': 'location_update',
-                            'location': result.get('location')
-                        })
+                        self._send_result_fields(client_socket, result)
                         PlayerManager.save_player_data(name, player_data)
                         self.send_player_status(client_socket, player_data)
                     elif action == 'back_to_game':
@@ -2066,20 +1509,7 @@ class ChatServer:
                         PlayerManager.save_player_data(name, player_data)
                         self.send_player_status(client_socket, player_data)
                     elif action == 'mahjong_game_end':
-                        # 麻将游戏结束
-                        if result.get('message'):
-                            self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        if 'room_data' in result:
-                            self.send_to(client_socket, {
-                                'type': 'room_update',
-                                'room_data': result['room_data']
-                            })
-                        # 发送位置更新
-                        if 'location' in result:
-                            self.send_to(client_socket, {
-                                'type': 'location_update',
-                                'location': result.get('location')
-                            })
+                        self._send_result_fields(client_socket, result)
                         # 通知房间内其他玩家
                         if 'notify_room' in result:
                             notify = result['notify_room']
