@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from .config import HOST, PORT, CHAT_LOG_DIR, CHAT_HISTORY_DIR, MAINTENANCE_HOUR
 from .player_manager import PlayerManager
 from .lobby_engine import LobbyEngine
+from .user_schema import get_title_name
 
 # 导入游戏模块
 from games.jrpg import JRPGData, JRPGEngine
@@ -822,20 +823,56 @@ class ChatServer:
         
         changed = False
         
-        # 2025年早期玩家头衔
-        if now.year == 2025 and '先驱者' not in titles['owned']:
-            titles['owned'].append('先驱者')
+        # 2025年早期玩家头衔（2025年内注册的账号）
+        created_at = player_data.get('created_at', '')
+        if created_at.startswith('2025') and 'early_bird' not in titles['owned']:
+            titles['owned'].append('early_bird')
             changed = True
         
         # 2025圣诞节头衔 (12月24-26日)
         if now.year == 2025 and now.month == 12 and 24 <= now.day <= 26:
-            if '圣诞快乐' not in titles['owned']:
-                titles['owned'].append('圣诞快乐')
+            if 'christmas_2025' not in titles['owned']:
+                titles['owned'].append('christmas_2025')
                 changed = True
         
         if changed:
             player_data['titles'] = titles
             PlayerManager.save_player_data(player_data['name'], player_data)
+
+    def _track_login_day(self, player_data):
+        """记录登录天数并检查veteran头衔"""
+        from datetime import datetime
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        social_stats = player_data.get('social_stats', {})
+        last_login = social_stats.get('last_login_date', '')
+        
+        if today != last_login:
+            social_stats['last_login_date'] = today
+            social_stats['login_days'] = social_stats.get('login_days', 0) + 1
+            player_data['social_stats'] = social_stats
+            
+            # 检查veteran头衔
+            if social_stats['login_days'] >= 30:
+                titles = player_data.get('titles', {'owned': [], 'displayed': []})
+                if 'veteran' not in titles.get('owned', []):
+                    titles.setdefault('owned', []).append('veteran')
+                    player_data['titles'] = titles
+            
+            PlayerManager.save_player_data(player_data['name'], player_data)
+
+    def _track_chat_message(self, player_name, player_data):
+        """记录聊天消息数并检查chat_active头衔"""
+        social_stats = player_data.get('social_stats', {})
+        social_stats['chat_messages'] = social_stats.get('chat_messages', 0) + 1
+        player_data['social_stats'] = social_stats
+        
+        # 检查chat_active头衔
+        if social_stats['chat_messages'] >= 1000:
+            titles = player_data.get('titles', {'owned': [], 'displayed': []})
+            if 'chat_active' not in titles.get('owned', []):
+                titles.setdefault('owned', []).append('chat_active')
+                player_data['titles'] = titles
 
     def _save_chat_log(self, channel, name, text):
         """保存聊天记录"""
@@ -1212,6 +1249,9 @@ class ChatServer:
             # 检查并授予时间相关头衔
             self._check_and_grant_time_titles(player_data)
             
+            # 记录登录天数
+            self._track_login_day(player_data)
+            
             with self.lock:
                 self.clients[client_socket]['state'] = 'playing'
                 self.clients[client_socket]['data'] = player_data
@@ -1535,6 +1575,9 @@ class ChatServer:
             channel = msg.get('channel', 1)
             display_name = f"[Lv.{player_data['level']}]{name}"
             
+            # 记录聊天统计并检查头衔
+            self._track_chat_message(name, player_data)
+            
             # 保存聊天记录
             self._save_chat_log(channel, display_name, text)
             
@@ -1557,11 +1600,14 @@ class ChatServer:
         """发送游戏大厅状态"""
         try:
             # 游戏大厅的状态数据
+            # 从 displayed 头衔列表取第一个ID，转为显示名
+            displayed = player_data.get('titles', {}).get('displayed', ['newcomer'])
+            title_id = displayed[0] if displayed else 'newcomer'
             status_data = {
                 'name': player_data['name'],
                 'level': player_data['level'],
                 'gold': player_data['gold'],
-                'title': player_data.get('title', '新人'),
+                'title': get_title_name(title_id),
                 'accessory': player_data.get('accessory'),
                 'avatar': player_data.get('avatar')
             }

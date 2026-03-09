@@ -179,5 +179,5 @@ class PlayerManager:
         """获取玩家头衔列表"""
         data = PlayerManager.load_player_data(name)
         if data and 'titles' in data:
-            return data['titles'].get('displayed', ['新人'])
-        return ['新人']
+            return data['titles'].get('displayed', ['newcomer'])
+        return ['newcomer']

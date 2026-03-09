@@ -282,13 +282,16 @@ class LobbyEngine:
     
     def get_profile(self, player_data, player_name):
         """获取个人资料并进入profile页面"""
-        rename_cards = player_data.get('rename_cards', 2)
+        inventory = player_data.get('inventory', {})
+        rename_cards = inventory.get('rename_card', 0)
         self.set_player_location(player_name, 'profile')
         
         # 获取头衔信息
-        titles = player_data.get('titles', {'owned': ['新人'], 'displayed': ['新人']})
-        displayed = titles.get('displayed', ['新人'])
-        displayed_str = ' | '.join(displayed) if displayed else '(无)'
+        from .user_schema import get_title_name
+        titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
+        displayed = titles.get('displayed', ['newcomer'])
+        displayed_names = [get_title_name(t) for t in displayed]
+        displayed_str = ' | '.join(displayed_names) if displayed_names else '(无)'
         
         # 获取段位信息
         from .user_schema import get_rank_name
@@ -332,7 +335,7 @@ class LobbyEngine:
                 return "用法: /rename <新用户名>"
             
             new_name = args.strip()
-            rename_cards = player_data.get('rename_cards', 2)
+            rename_cards = player_data.get('inventory', {}).get('rename_card', 0)
             
             if rename_cards <= 0:
                 return "你没有改名卡了。"
@@ -614,27 +617,25 @@ class LobbyEngine:
         
         # 头衔系统 - 查看我的头衔库 (全局可用)
         elif cmd == '/mytitle':
-            from .user_schema import TITLE_LIBRARY
+            from .user_schema import TITLE_LIBRARY, get_title_name
             
-            titles = player_data.get('titles', {'owned': ['新人'], 'displayed': ['新人']})
-            owned = titles.get('owned', ['新人'])
-            displayed = titles.get('displayed', ['新人'])
+            titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
+            owned = titles.get('owned', ['newcomer'])
+            displayed = titles.get('displayed', ['newcomer'])
             
             text = "【我的头衔库】\n\n"
             if displayed:
-                text += f"当前显示: {' | '.join(displayed)}\n\n"
+                displayed_names = [get_title_name(t) for t in displayed]
+                text += f"当前显示: {' | '.join(displayed_names)}\n\n"
             else:
                 text += "当前显示: (无)\n\n"
             text += "已拥有的头衔:\n"
-            for i, title in enumerate(owned, 1):
-                mark = " [显示中]" if title in displayed else ""
-                title_info = None
-                for tid, info in TITLE_LIBRARY.items():
-                    if info['name'] == title:
-                        title_info = info
-                        break
+            for i, title_id in enumerate(owned, 1):
+                mark = " [显示中]" if title_id in displayed else ""
+                title_info = TITLE_LIBRARY.get(title_id)
+                name = title_info['name'] if title_info else title_id
                 desc = f" - {title_info['desc']}" if title_info else ""
-                text += f"  {i}. {title}{mark}{desc}\n"
+                text += f"  {i}. {name}{mark}{desc}\n"
             
             total_titles = len(TITLE_LIBRARY)
             text += f"\n已收集: {len(owned)}/{total_titles}"
@@ -647,15 +648,15 @@ class LobbyEngine:
         elif cmd == '/alltitle':
             from .user_schema import TITLE_LIBRARY, TITLE_SOURCES
             
-            titles = player_data.get('titles', {'owned': ['新人'], 'displayed': ['新人']})
-            owned = titles.get('owned', ['新人'])
+            titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
+            owned = titles.get('owned', ['newcomer'])
             
             filter_source = args.lower() if args else None
             
             if filter_source and filter_source not in TITLE_SOURCES:
                 text = "可用的筛选类别:\n"
                 for src, name in TITLE_SOURCES.items():
-                    text += f"  /alltitles {src} - {name}头衔\n"
+                    text += f"  /alltitle {src} - {name}头衔\n"
                 return text
             
             text = "【头衔图鉴】\n"
@@ -671,8 +672,7 @@ class LobbyEngine:
                 if filter_source and source != filter_source:
                     continue
                 category_total += 1
-                name = info['name']
-                is_owned = name in owned
+                is_owned = tid in owned
                 if is_owned:
                     category_owned += 1
                 if source != current_source:
@@ -680,7 +680,7 @@ class LobbyEngine:
                     source_name = TITLE_SOURCES.get(source, source)
                     text += f"--- {source_name} ---\n"
                 status = "[已获得]" if is_owned else "[未获得]"
-                text += f"  {status} {name}\n"
+                text += f"  {status} {info['name']}\n"
                 text += f"       {info['desc']}\n"
                 text += f"       条件: {info['condition']}\n"
             
@@ -695,8 +695,10 @@ class LobbyEngine:
             if not args:
                 return "用法: /title <编号> 或 /title clear"
             
-            titles = player_data.get('titles', {'owned': ['新人'], 'displayed': ['新人']})
-            owned = titles.get('owned', ['新人'])
+            from .user_schema import get_title_name
+            
+            titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
+            owned = titles.get('owned', ['newcomer'])
             displayed = titles.get('displayed', [])
             
             if args.lower() == 'clear':
@@ -711,25 +713,27 @@ class LobbyEngine:
                 if idx < 0 or idx >= len(owned):
                     return f"无效的编号。你有 {len(owned)} 个头衔。"
                 
-                title = owned[idx]
+                title_id = owned[idx]
+                title_display = get_title_name(title_id)
                 
-                if title in displayed:
-                    displayed.remove(title)
-                    msg = f"已取消显示头衔: {title}"
+                if title_id in displayed:
+                    displayed.remove(title_id)
+                    msg = f"已取消显示头衔: {title_display}"
                 else:
                     if len(displayed) >= 3:
                         return "最多只能显示3个头衔。请先取消其他头衔。"
-                    displayed.append(title)
-                    msg = f"已添加显示头衔: {title}"
+                    displayed.append(title_id)
+                    msg = f"已添加显示头衔: {title_display}"
                 
                 titles['displayed'] = displayed
                 player_data['titles'] = titles
                 from .player_manager import PlayerManager
                 PlayerManager.save_player_data(player_name, player_data)
-                return msg + f"\n当前显示: {' | '.join(displayed) if displayed else '(无)'}"
+                displayed_names = [get_title_name(t) for t in displayed]
+                return msg + f"\n当前显示: {' | '.join(displayed_names) if displayed_names else '(无)'}"
                 
             except ValueError:
-                return "请输入头衔编号。使用 /titles 查看列表。"
+                return "请输入头衔编号。使用 /mytitle 查看列表。"
         
         elif cmd == '/exit':
             # 设置待确认状态
@@ -836,12 +840,15 @@ class LobbyEngine:
             if not game_save:
                 return "游戏存档损坏，请联系管理员。"
             
-            # 将玩家名添加到游戏存档中供引擎使用
+            # 将玩家名和全局金币注入游戏存档供引擎使用
             game_save['name'] = player_name
+            game_save['gold'] = player_data.get('gold', 0)
             
             result = engine.process_command(game_save, command)
             
-            # 同步游戏存档回玩家数据
+            # 同步：全局金币回写，游戏存档回写
+            player_data['gold'] = game_save.pop('gold', player_data.get('gold', 0))
+            game_save.pop('name', None)
             if 'games' not in player_data:
                 player_data['games'] = {}
             player_data['games']['jrpg'] = game_save
@@ -868,7 +875,7 @@ class LobbyEngine:
         """
         from .user_schema import (
             get_rank_points_change, get_rank_info, get_rank_name,
-            calculate_rank_change, get_title_from_rank
+            calculate_rank_change, get_title_id_from_rank
         )
         from .player_manager import PlayerManager
         
@@ -924,35 +931,26 @@ class LobbyEngine:
                         new_points = prev_info.get('points_up', 40) // 2
                         demoted = True
             
-            # 更新统计数据
-            stats['total_games'] = stats.get('total_games', 0) + 1
-            stats['ranked_games'] = stats.get('ranked_games', 0) + 1
-            if game_type_base == 'east':
-                stats['east_games'] = stats.get('east_games', 0) + 1
-            else:
-                stats['south_games'] = stats.get('south_games', 0) + 1
-            
-            # 更新名次统计
-            place_keys = ['wins', 'second', 'third', 'fourth']
-            stats[place_keys[place - 1]] = stats.get(place_keys[place - 1], 0) + 1
-            
-            # 更新麻将数据
+            # 更新麻将段位数据（对局统计由 _process_game_stats 统一处理）
             mahjong_data['rank'] = new_rank
             mahjong_data['rank_points'] = new_points
-            mahjong_data['stats'] = stats
             
             # 更新历史最高段位
             from .user_schema import get_rank_index
             if get_rank_index(new_rank) > get_rank_index(mahjong_data.get('max_rank', 'novice_1')):
                 mahjong_data['max_rank'] = new_rank
             
-            # 如果升段，添加新头衔
+            # 如果升段，检查是否有对应头衔
             if promoted:
-                new_title = get_title_from_rank(new_rank)
-                titles = player_data.get('titles', {'owned': ['新人'], 'displayed': ['新人']})
-                if new_title not in titles['owned']:
-                    titles['owned'].append(new_title)
-                player_data['titles'] = titles
+                title_id = get_title_id_from_rank(new_rank)
+                if title_id:
+                    titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
+                    if title_id not in titles['owned']:
+                        titles['owned'].append(title_id)
+                    player_data['titles'] = titles
+            
+            # 检查并授予所有符合条件的麻将头衔
+            self._check_mahjong_titles(player_data, stats)
             
             player_data['mahjong'] = mahjong_data
             
@@ -973,6 +971,98 @@ class LobbyEngine:
             }
         
         return rank_changes
+    
+    def _update_mahjong_stat(self, player_name, stat_key, increment=1):
+        """更新麻将统计数据并检查头衔"""
+        from .player_manager import PlayerManager
+        
+        player_data = self.online_players.get(player_name)
+        if not player_data:
+            player_data = PlayerManager.load_player_data(player_name)
+        if not player_data:
+            return
+        
+        mahjong_data = player_data.get('mahjong', {})
+        stats = mahjong_data.get('stats', {})
+        stats[stat_key] = stats.get(stat_key, 0) + increment
+        mahjong_data['stats'] = stats
+        player_data['mahjong'] = mahjong_data
+        
+        self._check_mahjong_titles(player_data, stats)
+        PlayerManager.save_player_data(player_name, player_data)
+    
+    def _check_mahjong_titles(self, player_data, stats):
+        """根据麻将统计数据检查并授予头衔"""
+        titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
+        owned = titles['owned']
+        
+        checks = [
+            ('mahjong_beginner', stats.get('total_games', 0) >= 1),
+            ('riichi_master', stats.get('riichi_count', 0) >= 100),
+            ('tsumo_king', stats.get('tsumo_count', 0) >= 100),
+            ('first_place_hunter', stats.get('wins', 0) >= 50),
+            ('yakuman_holder', stats.get('yakuman_count', 0) >= 1),
+        ]
+        
+        for title_id, condition in checks:
+            if condition and title_id not in owned:
+                owned.append(title_id)
+        
+        player_data['titles'] = titles
+    
+    def _track_invite(self, player_name, player_data):
+        """记录邀请统计并检查friendly头衔"""
+        from .player_manager import PlayerManager
+        
+        social_stats = player_data.get('social_stats', {})
+        social_stats['invites_sent'] = social_stats.get('invites_sent', 0) + 1
+        player_data['social_stats'] = social_stats
+        
+        if social_stats['invites_sent'] >= 10:
+            titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
+            if 'friendly' not in titles['owned']:
+                titles['owned'].append('friendly')
+                player_data['titles'] = titles
+        
+        PlayerManager.save_player_data(player_name, player_data)
+    
+    def _process_game_stats(self, room, rankings):
+        """更新所有玩家的对局统计（每局结束时调用，不区分段位/非段位）"""
+        from .player_manager import PlayerManager
+        
+        game_mode = getattr(room, 'game_mode', 'hanchan')
+        
+        place_keys = ['wins', 'second', 'third', 'fourth']
+        for place, pos in enumerate(rankings, 1):
+            player_name = room.players[pos]
+            if not player_name or room.is_bot(player_name):
+                continue
+            
+            player_data = self.online_players.get(player_name)
+            if not player_data:
+                player_data = PlayerManager.load_player_data(player_name)
+            if not player_data:
+                continue
+            
+            mahjong_data = player_data.get('mahjong', {})
+            stats = mahjong_data.get('stats', {})
+            
+            stats['total_games'] = stats.get('total_games', 0) + 1
+            stats[place_keys[place - 1]] = stats.get(place_keys[place - 1], 0) + 1
+            
+            if game_mode == 'tonpu':
+                stats['east_games'] = stats.get('east_games', 0) + 1
+            else:
+                stats['south_games'] = stats.get('south_games', 0) + 1
+            
+            if room.is_ranked_match():
+                stats['ranked_games'] = stats.get('ranked_games', 0) + 1
+            
+            mahjong_data['stats'] = stats
+            player_data['mahjong'] = mahjong_data
+            
+            self._check_mahjong_titles(player_data, stats)
+            PlayerManager.save_player_data(player_name, player_data)
     
     def _build_game_start_result(self, room, player_name, msg_prefix, notify_prefix):
         """构建游戏开始/下一局的返回结果"""
@@ -1262,7 +1352,6 @@ class LobbyEngine:
   役满: {stats.get('yakuman_count', 0)}
 """
             return text
-            return text
         
         # 加入房间
         elif cmd == '/join':
@@ -1353,6 +1442,9 @@ class LobbyEngine:
             
             # 发送邀请
             engine.send_invite(player_name, target, room.room_id)
+            
+            # 记录邀请统计并检查friendly头衔
+            self._track_invite(player_name, player_data)
             
             # 通知被邀请者
             if self.invite_callback:
@@ -1592,6 +1684,9 @@ class LobbyEngine:
                 rankings = sorted(range(4), key=lambda i: scores[i], reverse=True)
                 for rank, i in enumerate(rankings):
                     result_lines.append(f"  {rank+1}. {players[i]}: {scores[i]}点")
+                
+                # 更新所有玩家的对局统计（无论是否段位战）
+                self._process_game_stats(room, rankings)
                 
                 # 段位场处理段位点数变化
                 rank_changes = None
@@ -2170,6 +2265,11 @@ class LobbyEngine:
                 if result.get('success'):
                     all_results.append(result)
                     winner_name = room.players[winner_pos]
+                    # 记录荣和统计
+                    if not room.is_bot(winner_name):
+                        self._update_mahjong_stat(winner_name, 'ron_count')
+                        if result.get('is_yakuman'):
+                            self._update_mahjong_stat(winner_name, 'yakuman_count')
                     all_win_animations.append({
                         'winner': winner_name,
                         'win_type': 'ron',
@@ -2186,6 +2286,10 @@ class LobbyEngine:
             
             if not all_results:
                 return f"无役"
+            
+            # 记录放铳统计
+            if discarder_pos is not None and not room.is_bot(discarder_name):
+                self._update_mahjong_stat(discarder_name, 'deal_in_count')
             
             # 游戏结束
             room.state = 'finished'
@@ -2242,6 +2346,11 @@ class LobbyEngine:
             if not result.get('success'):
                 return f"{result.get('error', '无役')}"
             
+            # 记录自摸统计
+            self._update_mahjong_stat(player_name, 'tsumo_count')
+            if result.get('is_yakuman'):
+                self._update_mahjong_stat(player_name, 'yakuman_count')
+            
             room.state = 'finished'
             room.waiting_for_action = False
             
@@ -2293,6 +2402,9 @@ class LobbyEngine:
             success, error = room.declare_riichi(pos, discard_tile)
             if not success:
                 return f"{error}"
+            
+            # 记录立直统计
+            self._update_mahjong_stat(player_name, 'riichi_count')
             
             # 打出立直宣言牌
             room.discard_tile(pos, discard_tile)
@@ -2545,6 +2657,14 @@ class LobbyEngine:
             if not result.get('success'):
                 return f"{result.get('error', '无役')}"
             
+            # 记录抢杠统计
+            self._update_mahjong_stat(player_name, 'ron_count')
+            if result.get('is_yakuman'):
+                self._update_mahjong_stat(player_name, 'yakuman_count')
+            kakan_name = room.players[kakan_pos]
+            if not room.is_bot(kakan_name):
+                self._update_mahjong_stat(kakan_name, 'deal_in_count')
+            
             yaku_text = "\n".join([f"  {y[0]} ({y[1]}番)" if not y[2] else f"  ★{y[0]} (役满)" for y in result['yakus']])
             
             room.state = 'finished'
@@ -2710,20 +2830,22 @@ class LobbyEngine:
             return f"用户名 '{new_name}' 已被使用。"
         
         old_name = player_name
-        rename_cards = player_data.get('rename_cards', 2)
+        rename_cards = player_data.get('inventory', {}).get('rename_card', 0)
         
         # 执行改名
         success = PlayerManager.rename_player(old_name, new_name)
+        
         if not success:
             return "改名失败，请稍后重试。"
         
         # 更新玩家数据
         player_data['name'] = new_name
-        player_data['rename_cards'] = rename_cards - 1
+        if 'inventory' not in player_data:
+            player_data['inventory'] = {}
+        player_data['inventory']['rename_card'] = rename_cards - 1
         
         # 更新引擎中的引用
         if old_name in self.online_players:
-            del self.online_players[old_name]
             self.online_players[new_name] = player_data
         if old_name in self.player_locations:
             location = self.player_locations[old_name]

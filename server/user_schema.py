@@ -182,26 +182,6 @@ TITLE_LIBRARY = {
         'condition': '累计获得一位50次',
     },
     
-    # ===== JRPG头衔 =====
-    'jrpg_adventurer': {
-        'name': '冒险者',
-        'source': 'jrpg',
-        'desc': '踏上冒险',
-        'condition': '开始JRPG冒险',
-    },
-    'jrpg_slayer': {
-        'name': '怪物猎人',
-        'source': 'jrpg',
-        'desc': '斩杀百怪',
-        'condition': '累计击杀100只怪物',
-    },
-    'jrpg_wealthy': {
-        'name': '土豪',
-        'source': 'jrpg',
-        'desc': '富甲一方',
-        'condition': '持有10000金币',
-    },
-    
     # ===== 社交头衔 =====
     'chat_active': {
         'name': '话痨',
@@ -229,6 +209,15 @@ TITLE_LIBRARY = {
         'desc': '2025圣诞节',
         'condition': '2025年圣诞节期间登录',
     },
+}
+
+# 段位ID → 头衔ID 映射（只在达到新大段时授予头衔）
+RANK_TO_TITLE = {
+    'adept_1': 'mahjong_adept',
+    'expert_1': 'mahjong_expert',
+    'master_1': 'mahjong_master',
+    'saint_1': 'mahjong_saint',
+    'celestial': 'mahjong_celestial',
 }
 
 # 头衔来源分类
@@ -323,19 +312,26 @@ def get_default_user_template(name="", password_hash=""):
         'level': 1,
         'exp': 0,
         'gold': 100,
-        'title': '新人',
         'accessory': None,
         'avatar': None,
+        
+        # 社交/全局统计
+        'social_stats': {
+            'login_days': 0,          # 累计登录天数
+            'last_login_date': '',    # 上次登录日期 (YYYY-MM-DD)
+            'chat_messages': 0,       # 累计发送聊天消息数
+            'invites_sent': 0,        # 累计邀请玩家次数
+        },
         
         # 背包系统 {物品id: 数量}
         'inventory': {
             'rename_card': 2,  # 默认赠送2张改名卡
         },
         
-        # 头衔系统 (可拥有多个，最多显示3个)
+        # 头衔系统 (存储头衔ID，可拥有多个，最多显示3个)
         'titles': {
-            'owned': ['新人'],           # 已拥有的头衔
-            'displayed': ['新人'],        # 当前显示的头衔 (最多3个)
+            'owned': ['newcomer'],        # 已拥有的头衔ID
+            'displayed': ['newcomer'],    # 当前显示的头衔ID (最多3个)
         },
         
         # 麻将段位系统 (仿雀魂)
@@ -376,7 +372,6 @@ def get_default_user_template(name="", password_hash=""):
                 'max_hp': 100,
                 'attack': 10,
                 'defense': 5,
-                'gold': 50,
                 'current_area': 'forest',
                 'inventory': [],
                 'equipment': {'weapon': None, 'armor': None}
@@ -410,6 +405,32 @@ def ensure_user_schema(user_data):
         # 已有 inventory，删除旧字段
         user_data.pop('rename_cards', None)
         changes.append("删除: 旧字段 rename_cards")
+    
+    # 删除已废弃的 title（单数）字段
+    if 'title' in user_data:
+        user_data.pop('title', None)
+        changes.append("删除: 旧字段 title")
+    
+    # 迁移头衔：将显示名迁移为ID
+    _name_to_id = {info['name']: tid for tid, info in TITLE_LIBRARY.items()}
+    titles = user_data.get('titles')
+    if titles:
+        for key in ('owned', 'displayed'):
+            lst = titles.get(key, [])
+            migrated = []
+            for t in lst:
+                if t in _name_to_id:
+                    migrated.append(_name_to_id[t])
+                    changes.append(f"迁移头衔: '{t}' -> '{_name_to_id[t]}'")
+                else:
+                    migrated.append(t)
+            titles[key] = migrated
+    
+    # 迁移 JRPG 存档中的 gold 到全局
+    jrpg_save = user_data.get('games', {}).get('jrpg', {})
+    if 'gold' in jrpg_save:
+        user_data['gold'] = user_data.get('gold', 0) + jrpg_save.pop('gold', 0)
+        changes.append("迁移: games.jrpg.gold -> gold")
     
     def merge_dict(target, source, path=""):
         """递归合并字典，只添加缺失的键"""
@@ -536,7 +557,6 @@ def can_enter_match(rank_id, match_type):
     return player_idx >= required_idx
 
 
-def get_title_from_rank(rank_id):
-    """根据段位生成头衔"""
-    rank_info = get_rank_info(rank_id)
-    return rank_info['name']
+def get_title_id_from_rank(rank_id):
+    """根据段位ID获取对应的头衔ID，无对应头衔则返回None"""
+    return RANK_TO_TITLE.get(rank_id)
