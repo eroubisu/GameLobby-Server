@@ -1030,6 +1030,11 @@ class LobbyEngine:
         avatar = player_data.get('avatar')
         location = self.get_player_location(player_name)
         
+        # 段位场名称提示
+        match_shortcuts = {'/yuujin', '/dou', '/gin', '/kin', '/gyoku', '/ouza'}
+        if cmd in match_shortcuts:
+            return f"你是否想创建房间？请使用 /create {cmd[1:]}"
+
         # 创建房间
         if cmd == '/create':
             if location != 'mahjong':

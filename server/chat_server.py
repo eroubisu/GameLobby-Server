@@ -1034,8 +1034,11 @@ class ChatServer:
             return
         
         if msg_type == 'avatar_update':
-            # 处理头像更新
             avatar_data = msg.get('avatar')
+            if avatar_data and state == 'register':
+                # 注册流程：将头像数据传给 _handle_register
+                self._handle_register(client_socket, avatar_data)
+                return
             if avatar_data and state == 'playing':
                 with self.lock:
                     player_data = self.clients[client_socket].get('data')
