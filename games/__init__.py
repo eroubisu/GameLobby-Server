@@ -28,6 +28,8 @@ def get_all_games():
 # 自动注册游戏
 from . import jrpg
 from . import mahjong
+from . import chess as chess_game
 
 register_game('jrpg', jrpg)
 register_game('mahjong', mahjong)
+register_game('chess', chess_game)

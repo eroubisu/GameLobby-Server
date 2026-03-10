@@ -38,6 +38,8 @@ class LobbyEngine:
             location = self.player_locations[player_name]
             if location.startswith('mahjong') and 'mahjong' in self.game_engines:
                 self.game_engines['mahjong'].leave_room(player_name)
+            if location.startswith('chess') and 'chess' in self.game_engines:
+                self.game_engines['chess'].leave_room(player_name)
             del self.player_locations[player_name]
         # 清除待确认状态
         if player_name in self.pending_confirms:
@@ -540,6 +542,109 @@ class LobbyEngine:
                         'room_data': room.get_table_data()
                     }
                 
+                # 创建国际象棋房间交互式选择
+                elif pending_type == 'create_chess_room':
+                    from games.chess.room import ChessRoom
+                    from .user_schema import get_rank_name, get_rank_index
+                    
+                    current_tc = pending_data.get('time_control') if pending_data else None
+                    current_match = pending_data.get('match_type') if pending_data else None
+                    
+                    input_val = command.strip().lower()
+                    while input_val.startswith('/'):
+                        input_val = input_val[1:]
+                    
+                    if input_val in ['back', 'b']:
+                        del self.pending_confirms[player_name]
+                        return "已取消。"
+                    
+                    if current_match is None:
+                        # 第一步：选择段位场
+                        match_type = None
+                        if input_val in ['1', 'yuujin']:
+                            match_type = 'yuujin'
+                        elif input_val in ['2', 'dou']:
+                            match_type = 'dou'
+                        elif input_val in ['3', 'gin']:
+                            match_type = 'gin'
+                        elif input_val in ['4', 'kin']:
+                            match_type = 'kin'
+                        elif input_val in ['5', 'gyoku']:
+                            match_type = 'gyoku'
+                        elif input_val in ['6', 'ouza']:
+                            match_type = 'ouza'
+                        
+                        if match_type is None:
+                            return f"无效选择 '{input_val}'，请输入 1-6。"
+                        
+                        match_info = ChessRoom.MATCH_TYPES.get(match_type, {})
+                        if match_info.get('ranked'):
+                            chess_rank = player_data.get('chess', {}).get('rank', 'novice_1')
+                            min_rank = match_info.get('min_rank', 'novice_1')
+                            if get_rank_index(chess_rank) < get_rank_index(min_rank):
+                                del self.pending_confirms[player_name]
+                                return f"段位不足！{match_info['name_cn']}需要 {get_rank_name(min_rank)} 以上。"
+                        
+                        self.pending_confirms[player_name] = ('create_chess_room', {'match_type': match_type, 'time_control': None})
+                        
+                        text = f"✓ 段位场: {match_info.get('name_cn', match_type)}\n\n"
+                        text += "请选择时间控制  (输入编号，/back 取消)\n\n"
+                        text += "  /1  闪电战    3分+2秒\n"
+                        text += "  /2  快棋      10分+5秒\n"
+                        text += "  /3  慢棋      30分+10秒"
+                        return text
+                    
+                    # 第二步：选择时间控制
+                    time_control = None
+                    if input_val in ['1', 'blitz']:
+                        time_control = 'blitz'
+                    elif input_val in ['2', 'rapid']:
+                        time_control = 'rapid'
+                    elif input_val in ['3', 'classical']:
+                        time_control = 'classical'
+                    
+                    if time_control is None:
+                        return f"无效选择 '{input_val}'，请输入 1-3。"
+                    
+                    del self.pending_confirms[player_name]
+                    
+                    engine = self.game_engines.get('chess')
+                    if not engine:
+                        return "国际象棋引擎未初始化，请先 /play chess"
+                    
+                    avatar = player_data.get('avatar')
+                    
+                    room, error = engine.create_room(player_name, time_control=time_control, match_type=current_match)
+                    if error:
+                        return f"{error}"
+                    
+                    room.set_player_avatar(player_name, avatar)
+                    chess_rank = player_data.get('chess', {}).get('rank', 'novice_1')
+                    room.set_player_rank(player_name, chess_rank)
+                    self.set_player_location(player_name, 'chess_room')
+                    
+                    tc_info = ChessRoom.TIME_CONTROLS.get(time_control, {})
+                    match_info = ChessRoom.MATCH_TYPES.get(current_match, {})
+                    is_ranked = match_info.get('ranked', False)
+                    
+                    ranked_tag = " [段位战]" if is_ranked else ""
+                    msg = f"✓ 房间已创建{ranked_tag}\n\n"
+                    msg += f"  房间ID:  {room.room_id}\n"
+                    msg += f"  段位场:  {match_info.get('name_cn', '友人场')}\n"
+                    msg += f"  时间:    {tc_info.get('name', '快棋')} ({tc_info.get('desc', '')})\n"
+                    msg += f"  位置:    白方（房主）\n\n"
+                    msg += f"  等待对手加入 ({room.get_player_count()}/2)\n"
+                    msg += f"  /invite @玩家名  邀请\n"
+                    if not is_ranked:
+                        msg += "  /bot             添加机器人"
+                    
+                    return {
+                        'action': 'chess_room_update',
+                        'location': 'chess_room',
+                        'message': msg,
+                        'room_data': room.get_table_data()
+                    }
+                
                 # 未知的 pending_type，清除并继续
                 else:
                     del self.pending_confirms[player_name]
@@ -552,6 +657,8 @@ class LobbyEngine:
                         return {'action': 'exit'}
                     elif pending == 'back':
                         return self._do_back_confirm(player_name)
+                    elif pending == 'back_chess':
+                        return self._do_back_chess_confirm(player_name)
                 else:
                     del self.pending_confirms[player_name]
                     return "已取消。"
@@ -779,6 +886,9 @@ class LobbyEngine:
                 elif game_id == 'mahjong':
                     from games.mahjong import MahjongData, MahjongEngine
                     self.game_engines['mahjong'] = MahjongEngine(MahjongData())
+                elif game_id == 'chess':
+                    from games.chess.engine import ChessEngine
+                    self.game_engines['chess'] = ChessEngine()
             
             # 设置位置
             self.set_player_location(player_name, game_id)
@@ -811,6 +921,32 @@ class LobbyEngine:
   /back        - 返回上一级
 
 输入 /help mahjong 查看完整说明
+"""
+                }
+            
+            # 国际象棋特殊提示
+            if game_id == 'chess':
+                from .user_schema import get_rank_name
+                chess_data = player_data.get('chess', {})
+                rank_id = chess_data.get('rank', 'novice_1')
+                rank_name = get_rank_name(rank_id)
+                rank_points = chess_data.get('rank_points', 0)
+                
+                return {
+                    'action': 'location_update',
+                    'location': game_id,
+                    'message': f"""────── {info['icon']} {info['name']} ──────
+
+  段位: {rank_name} ({rank_points}pt)
+
+  /create        创建房间
+  /rooms         房间列表
+  /join <ID>     加入房间
+  /rank          段位详情
+  /stats         战绩统计
+  /back          返回大厅
+
+  输入 /help chess 查看完整说明
 """
                 }
             
@@ -853,6 +989,12 @@ class LobbyEngine:
                 player_data['games'] = {}
             player_data['games']['jrpg'] = game_save
             
+            if result:
+                return result
+        
+        # ========== 国际象棋专用指令 ==========
+        if location.startswith('chess') and 'chess' in self.game_engines:
+            result = self._handle_chess_command(player_name, player_data, cmd, args)
             if result:
                 return result
         
@@ -1508,6 +1650,9 @@ class LobbyEngine:
             
             if room.state != 'waiting':
                 return "游戏已开始，无法添加机器人。"
+            
+            if room.is_ranked_match():
+                return "段位场不能添加机器人。"
             
             # 解析要添加的数量
             count = 1
@@ -2752,6 +2897,53 @@ class LobbyEngine:
                 'message': "已返回游戏大厅。\n输入 /games 查看可用游戏。"
             }
         
+        # 国际象棋对局中 -> 需确认
+        if location == 'chess_playing':
+            engine = self.game_engines.get('chess')
+            if engine:
+                room = engine.get_player_room(player_name)
+                if room and room.state == 'playing':
+                    self.pending_confirms[player_name] = 'back_chess'
+                    return {
+                        'action': 'confirm_prompt',
+                        'message': "⚠️ 对局进行中！退出将判负。\n输入 /y 确认，其他任意键取消。"
+                    }
+            # 游戏已结束，直接回房间
+            self.set_player_location(player_name, 'chess_room')
+            return {
+                'action': 'location_update',
+                'location': 'chess_room',
+                'message': "已返回房间。"
+            }
+        
+        # 国际象棋房间 -> 离开房间
+        if location == 'chess_room':
+            engine = self.game_engines.get('chess')
+            if engine:
+                room, error = engine.leave_room(player_name)
+            self.set_player_location(player_name, 'chess')
+            result = {
+                'action': 'back_to_game',
+                'location': 'chess',
+                'message': "已离开房间"
+            }
+            if room:
+                result['notify_room'] = {
+                    'room_id': room.room_id,
+                    'message': f"{player_name} 离开了房间",
+                    'room_data': room.get_table_data()
+                }
+            return result
+        
+        # 国际象棋 -> 大厅
+        if location == 'chess':
+            self.set_player_location(player_name, 'lobby')
+            return {
+                'action': 'location_update',
+                'location': 'lobby',
+                'message': "已离开国际象棋，返回游戏大厅。\n输入 /games 查看可用游戏。"
+            }
+        
         # 默认返回父位置
         parent = self.get_parent_location(location)
         if parent:
@@ -2785,6 +2977,29 @@ class LobbyEngine:
             'message': "已退出对局，返回麻将游戏。"
         }
     
+    def _do_back_chess_confirm(self, player_name):
+        """确认退出国际象棋对局（判负）"""
+        location = self.get_player_location(player_name)
+        
+        if location != 'chess_playing':
+            return "无需确认。"
+        
+        engine = self.game_engines.get('chess')
+        if engine:
+            room = engine.get_player_room(player_name)
+            if room and room.state == 'playing':
+                result = room.resign(player_name)
+                if result and room.is_ranked_match():
+                    self._process_chess_ranked_result(room, result)
+            engine.leave_room(player_name)
+        
+        self.set_player_location(player_name, 'chess')
+        return {
+            'action': 'back_to_game',
+            'location': 'chess',
+            'message': "已退出对局，返回国际象棋。"
+        }
+    
     def _do_home(self, player_name):
         """直接返回大厅"""
         location = self.get_player_location(player_name)
@@ -2801,12 +3016,780 @@ class LobbyEngine:
                     return "⚠️ 游戏进行中！请先输入 /quit 或 /back 退出对局。"
                 engine.leave_room(player_name)
         
+        # 如果在国际象棋相关位置，需要清理
+        if location.startswith('chess'):
+            engine = self.game_engines.get('chess')
+            if engine:
+                room = engine.get_player_room(player_name)
+                if room and room.state == 'playing':
+                    return "⚠️ 对局进行中！请先输入 /resign 认输或 /back 退出。"
+                engine.leave_room(player_name)
+        
         self.set_player_location(player_name, 'lobby')
         return {
             'action': 'location_update',
             'location': 'lobby',
             'message': "已返回游戏大厅。\n输入 /games 查看可用游戏。"
         }
+    
+    # ==================== 国际象棋指令处理 ====================
+    
+    def _handle_chess_command(self, player_name, player_data, cmd, args):
+        """处理国际象棋指令"""
+        engine = self.game_engines['chess']
+        avatar = player_data.get('avatar')
+        location = self.get_player_location(player_name)
+        
+        # 段位场名称快捷方式
+        match_shortcuts = {'/yuujin', '/dou', '/gin', '/kin', '/gyoku', '/ouza'}
+        if cmd in match_shortcuts:
+            return f"你是否想创建房间？请使用 /create {cmd[1:]}"
+        
+        # 创建房间
+        if cmd == '/create':
+            if location != 'chess':
+                return "请先返回国际象棋大厅再创建房间。"
+            
+            from games.chess.room import ChessRoom
+            from .user_schema import get_rank_name, get_rank_index
+            
+            match_type = None
+            time_control = None
+            
+            if args:
+                parts = args.lower().split()
+                for part in parts:
+                    if part in ['yuujin', 'yuu', 'y', 'friend', 'f']:
+                        match_type = 'yuujin'
+                    elif part in ['dou', 'd', 'bronze', 'copper']:
+                        match_type = 'dou'
+                    elif part in ['gin', 'g', 'silver']:
+                        match_type = 'gin'
+                    elif part in ['kin', 'k', 'gold']:
+                        match_type = 'kin'
+                    elif part in ['gyoku', 'jade']:
+                        match_type = 'gyoku'
+                    elif part in ['ouza', 'o', 'throne']:
+                        match_type = 'ouza'
+                    elif part in ['blitz', 'bl']:
+                        time_control = 'blitz'
+                    elif part in ['rapid', 'ra']:
+                        time_control = 'rapid'
+                    elif part in ['classical', 'cl']:
+                        time_control = 'classical'
+            
+            if match_type is None or time_control is None:
+                self.pending_confirms[player_name] = ('create_chess_room', {'match_type': match_type, 'time_control': time_control})
+                
+                if match_type is None:
+                    chess_rank = player_data.get('chess', {}).get('rank', 'novice_1')
+                    chess_rank_idx = get_rank_index(chess_rank)
+                    
+                    text = "请选择段位场  (输入编号，/back 取消)\n\n"
+                    text += "  /1  友人场      不影响段位\n"
+                    
+                    match_list = [
+                        ('铜之间', 'novice_1'),
+                        ('银之间', 'adept_1'),
+                        ('金之间', 'expert_1'),
+                        ('玉之间', 'master_1'),
+                        ('王座之间', 'saint_1'),
+                    ]
+                    
+                    for i, (cn_name, min_rank) in enumerate(match_list, 2):
+                        min_rank_idx = get_rank_index(min_rank)
+                        can_enter = chess_rank_idx >= min_rank_idx
+                        status = "" if can_enter else f"  (需要{get_rank_name(min_rank)})"
+                        text += f"  /{i}  {cn_name}{status}\n"
+                    
+                    return text
+                else:
+                    match_info = ChessRoom.MATCH_TYPES.get(match_type, {})
+                    text = f"✓ 段位场: {match_info.get('name_cn', match_type)}\n\n"
+                    text += "请选择时间控制  (输入编号，/back 取消)\n\n"
+                    text += "  /1  闪电战    3分+2秒\n"
+                    text += "  /2  快棋      10分+5秒\n"
+                    text += "  /3  慢棋      30分+10秒"
+                    return text
+            
+            # 直接创建（两个参数都已有）
+            match_info = ChessRoom.MATCH_TYPES.get(match_type, ChessRoom.MATCH_TYPES['yuujin'])
+            if match_info.get('ranked'):
+                chess_rank = player_data.get('chess', {}).get('rank', 'novice_1')
+                min_rank = match_info.get('min_rank', 'novice_1')
+                if get_rank_index(chess_rank) < get_rank_index(min_rank):
+                    return f"段位不足！{match_info['name_cn']}需要 {get_rank_name(min_rank)} 以上。"
+            
+            room, error = engine.create_room(player_name, time_control=time_control, match_type=match_type)
+            if error:
+                return f"{error}"
+            
+            room.set_player_avatar(player_name, avatar)
+            chess_rank = player_data.get('chess', {}).get('rank', 'novice_1')
+            room.set_player_rank(player_name, chess_rank)
+            self.set_player_location(player_name, 'chess_room')
+            
+            tc_info = ChessRoom.TIME_CONTROLS.get(time_control, {})
+            is_ranked = match_info.get('ranked', False)
+            
+            ranked_tag = " [段位战]" if is_ranked else ""
+            msg = f"✓ 房间已创建{ranked_tag}\n\n"
+            msg += f"  房间ID:  {room.room_id}\n"
+            msg += f"  段位场:  {match_info.get('name_cn', '友人场')}\n"
+            msg += f"  时间:    {tc_info.get('name', '快棋')} ({tc_info.get('desc', '')})\n"
+            msg += f"  位置:    白方（房主）\n\n"
+            msg += f"  等待对手加入 ({room.get_player_count()}/2)\n"
+            msg += f"  /invite @玩家名  邀请\n"
+            if not is_ranked:
+                msg += "  /bot             添加机器人"
+            return {
+                'action': 'chess_room_update',
+                'location': 'chess_room',
+                'message': msg,
+                'room_data': room.get_table_data()
+            }
+        
+        # 取消操作
+        elif cmd == '/cancel':
+            if player_name in self.pending_confirms:
+                del self.pending_confirms[player_name]
+                return "已取消。"
+            return "没有待处理的操作。"
+        
+        # 房间列表
+        elif cmd == '/rooms':
+            rooms = engine.list_rooms()
+            if not rooms:
+                return "当前没有可加入的房间。\n使用 /create 创建新房间。"
+            
+            text = "────── 房间列表 ──────\n\n"
+            for r in rooms:
+                text += f"  {r['room_id']}\n"
+                text += f"    房主: {r['host']}  |  {r.get('match_type_name', '友人场')} {r.get('time_control_name', '快棋')}  |  {r['player_count']}/2\n\n"
+            text += "/join <房间ID> 加入"
+            return text
+        
+        # 查看段位
+        elif cmd == '/rank':
+            from .user_schema import get_rank_info, get_rank_index
+            
+            chess_data = player_data.get('chess', {})
+            rank_id = chess_data.get('rank', 'novice_1')
+            rank_points = chess_data.get('rank_points', 0)
+            max_rank = chess_data.get('max_rank', 'novice_1')
+            rank_info = get_rank_info(rank_id)
+            max_rank_info = get_rank_info(max_rank)
+            
+            points_up = rank_info.get('points_up')
+            if points_up:
+                progress = min(100, int(rank_points / points_up * 100))
+                progress_bar = '█' * (progress // 10) + '░' * (10 - progress // 10)
+            else:
+                progress_bar = '████████████ MAX'
+                progress = 100
+            
+            text = f"""【国际象棋段位】
+
+当前段位: {rank_info['name']}
+段位点数: {rank_points}pt"""
+            if points_up:
+                text += f" / {points_up}pt"
+            text += f"""
+升段进度: [{progress_bar}] {progress}%
+历史最高: {max_rank_info['name']}
+"""
+            return text
+        
+        # 战绩统计
+        elif cmd == '/stats':
+            chess_data = player_data.get('chess', {})
+            stats = chess_data.get('stats', {})
+            
+            total = stats.get('total_games', 0)
+            wins = stats.get('wins', 0)
+            losses = stats.get('losses', 0)
+            draws = stats.get('draws', 0)
+            
+            win_rate = (wins / total * 100) if total > 0 else 0
+            
+            text = f"""【国际象棋战绩】
+
+总对局数: {total}
+  胜: {wins} ({wins/max(total,1)*100:.1f}%)
+  负: {losses} ({losses/max(total,1)*100:.1f}%)
+  和: {draws} ({draws/max(total,1)*100:.1f}%)
+
+胜率: {win_rate:.1f}%
+
+【时间分布】
+  闪电战: {stats.get('blitz_games', 0)}
+  快棋:   {stats.get('rapid_games', 0)}
+  慢棋:   {stats.get('classical_games', 0)}
+  段位战: {stats.get('ranked_games', 0)}
+"""
+            return text
+        
+        # 加入房间
+        elif cmd == '/join':
+            if location != 'chess':
+                return "请先返回国际象棋大厅再加入房间。"
+            
+            if not args:
+                return "用法: /join <房间ID>\n使用 /rooms 查看房间列表。"
+            
+            room_id = args.strip()
+            room = engine.get_room(room_id)
+            if not room:
+                return "房间不存在。"
+            
+            # 检查段位要求
+            from games.chess.room import ChessRoom
+            from .user_schema import get_rank_name, get_rank_index
+            match_info = ChessRoom.MATCH_TYPES.get(room.match_type, {})
+            
+            if match_info.get('ranked'):
+                chess_rank = player_data.get('chess', {}).get('rank', 'novice_1')
+                min_rank = match_info.get('min_rank', 'novice_1')
+                if get_rank_index(chess_rank) < get_rank_index(min_rank):
+                    return f"段位不足！{match_info['name_cn']}需要 {get_rank_name(min_rank)} 以上。"
+            
+            room, error = engine.join_room(room_id, player_name)
+            if error:
+                return f"{error}"
+            
+            room.set_player_avatar(player_name, avatar)
+            chess_rank = player_data.get('chess', {}).get('rank', 'novice_1')
+            room.set_player_rank(player_name, chess_rank)
+            self.set_player_location(player_name, 'chess_room')
+            pos = room.get_position(player_name)
+            
+            join_msg = f"✓ 加入房间成功\n\n"
+            join_msg += f"  房间ID:  {room.room_id}\n"
+            join_msg += f"  位置:    {room.POSITIONS[pos]}\n"
+            join_msg += f"  房主:    {room.host}\n\n"
+            join_msg += f"  等待开始 ({room.get_player_count()}/2)"
+            notify_msg = f"{player_name} 加入了房间"
+            if room.is_full():
+                notify_msg += "\n人已齐！房主可以输入 /start 开始游戏"
+            
+            return {
+                'action': 'chess_room_update',
+                'location': 'chess_room',
+                'message': join_msg,
+                'room_data': room.get_table_data(),
+                'notify_room': {
+                    'room_id': room_id,
+                    'message': notify_msg,
+                    'room_data': room.get_table_data()
+                }
+            }
+        
+        # 邀请玩家
+        elif cmd == '/invite':
+            if not args or not args.startswith('@'):
+                return "用法: /invite @玩家名"
+            
+            target = args[1:].strip()
+            room = engine.get_player_room(player_name)
+            if not room:
+                return "你还没有创建或加入房间。"
+            if target not in self.online_players:
+                return f"玩家 {target} 不在线。"
+            if target == player_name:
+                return "不能邀请自己。"
+            if engine.get_player_room(target):
+                return f"{target} 已经在一个房间中了。"
+            
+            engine.send_invite(player_name, target, room.room_id)
+            self._track_invite(player_name, player_data)
+            
+            if self.invite_callback:
+                self.invite_callback(target, {
+                    'type': 'game_invite',
+                    'from': player_name,
+                    'game': 'chess',
+                    'room_id': room.room_id,
+                    'message': f" {player_name} 邀请你加入国际象棋房间！\n输入 /play chess 然后 /accept 接受邀请"
+                })
+            
+            return f"已向 {target} 发送邀请"
+        
+        # 接受邀请
+        elif cmd == '/accept':
+            invite = engine.get_invite(player_name)
+            if not invite:
+                return "你没有收到邀请，或邀请已过期。"
+            
+            room_id = invite['room_id']
+            engine.clear_invite(player_name)
+            
+            room, error = engine.join_room(room_id, player_name)
+            if error:
+                return f"{error}"
+            
+            room.set_player_avatar(player_name, avatar)
+            chess_rank = player_data.get('chess', {}).get('rank', 'novice_1')
+            room.set_player_rank(player_name, chess_rank)
+            self.set_player_location(player_name, 'chess_room')
+            pos = room.get_position(player_name)
+            
+            return {
+                'action': 'chess_room_update',
+                'location': 'chess_room',
+                'message': f"✓ 接受邀请加入成功\n\n  房间ID: {room.room_id}\n  位置:   {room.POSITIONS[pos]}\n\n  等待开始 ({room.get_player_count()}/2)",
+                'room_data': room.get_table_data(),
+                'notify_room': {
+                    'room_id': room_id,
+                    'message': f"{player_name} 接受邀请加入了房间",
+                    'room_data': room.get_table_data()
+                }
+            }
+        
+        # 添加机器人
+        elif cmd == '/bot':
+            room = engine.get_player_room(player_name)
+            if not room:
+                return "你不在任何房间中。"
+            if room.host != player_name:
+                return "只有房主才能添加机器人。"
+            if room.state != 'waiting':
+                return "游戏已开始，无法添加机器人。"
+            if room.is_ranked_match():
+                return "段位场不能添加机器人。"
+            
+            success, result = room.add_bot()
+            if not success:
+                return result
+            
+            bot_name = result
+            notify_msg = f"🤖 {bot_name} 加入了房间"
+            if room.is_full():
+                notify_msg += "\n人已齐，房主输入 /start 开始"
+            
+            return {
+                'action': 'chess_room_update',
+                'message': f"✓ 已添加机器人: {bot_name}" + ("\n人已齐，输入 /start 开始" if room.is_full() else ""),
+                'room_data': room.get_table_data(),
+                'notify_room': {
+                    'room_id': room.room_id,
+                    'message': notify_msg,
+                    'room_data': room.get_table_data()
+                }
+            }
+        
+        # 开始游戏
+        elif cmd == '/start':
+            room = engine.get_player_room(player_name)
+            if not room:
+                return "你不在任何房间中。"
+            if room.host != player_name:
+                return "只有房主才能开始游戏。"
+            if room.state != 'waiting':
+                return "游戏已经开始了。"
+            if not room.is_full():
+                return f"需要2名玩家才能开始。当前: {room.get_player_count()}/2"
+            
+            if room.start_game():
+                for p in room.players.values():
+                    if p and not room.is_bot(p):
+                        self.set_player_location(p, 'chess_playing')
+                
+                pos = room.get_position(player_name)
+                my_color = room.POSITIONS[pos]
+                current_name = room.get_current_player_name()
+                
+                msg = f"────── ♟️ 对局开始 ──────\n\n"
+                msg += f"  你执: {my_color}\n"
+                
+                if pos == room.current_side():
+                    msg += "轮到你走棋 (如 e4, Nf3, O-O)"
+                else:
+                    msg += f"等待 {current_name} 走棋"
+                
+                result = {
+                    'action': 'chess_game_start',
+                    'location': 'chess_playing',
+                    'message': msg,
+                    'room_data': room.get_table_data(),
+                    'notify_room': {
+                        'room_id': room.room_id,
+                        'message': f"♟️ 对局开始！\n白方: {room.players[0]}\n黑方: {room.players[1]}",
+                        'room_data': room.get_table_data(),
+                        'game_started': True,
+                        'location': 'chess_playing'
+                    }
+                }
+                
+                # 如果对方是机器人且白方是机器人，让机器人先走
+                if room.is_bot(room.get_current_player_name()):
+                    san, game_result = room.make_bot_move()
+                    if san:
+                        result['message'] += f"\n\n← {room.get_current_player_name()}: {san}"
+                        if game_result and game_result.get('type') == 'check':
+                            result['message'] += "  ♚ 将军！"
+                        result['message'] += "\n轮到你走棋"
+                        result['room_data'] = room.get_table_data()
+                
+                return result
+            else:
+                return "开始游戏失败。"
+        
+        # ========== 对局中指令 ==========
+        
+        # 走棋
+        if cmd in ('/m', '/move'):
+            room = engine.get_player_room(player_name)
+            if not room or room.state != 'playing':
+                return "当前不在对局中。"
+            if not args:
+                return "用法: /m <走法>\n例: /m e4, /m Nf3, /m O-O\n输入 /moves 查看合法走法。"
+            return self._process_chess_move(player_name, room, args)
+        
+        # 显示棋盘
+        if cmd in ('/board', '/b'):
+            room = engine.get_player_room(player_name)
+            if not room:
+                return "你不在任何房间中。"
+            # 棋盘在右上面板渲染，这里返回提示信息
+            return {
+                'action': 'chess_room_update',
+                'message': '棋盘已在右侧面板显示。',
+                'room_data': room.get_table_data(),
+            }
+        
+        # 合法走法
+        if cmd == '/moves':
+            room = engine.get_player_room(player_name)
+            if not room or room.state != 'playing':
+                return "当前不在对局中。"
+            moves = room.get_legal_moves_san()
+            if not moves:
+                return "没有合法走法。"
+            return f"【合法走法】({len(moves)}种)\n" + ', '.join(moves)
+        
+        # 走棋历史
+        if cmd == '/history':
+            room = engine.get_player_room(player_name)
+            if not room:
+                return "你不在任何房间中。"
+            return f"走棋记录:\n{room.format_move_history(20)}"
+        
+        # 认输
+        if cmd == '/resign':
+            room = engine.get_player_room(player_name)
+            if not room or room.state != 'playing':
+                return "当前不在对局中。"
+            
+            result = room.resign(player_name)
+            if result:
+                return self._finish_chess_game(room, result)
+            return "认输失败。"
+        
+        # 提出和棋
+        if cmd == '/draw':
+            room = engine.get_player_room(player_name)
+            if not room or room.state != 'playing':
+                return "当前不在对局中。"
+            
+            pos, error = room.offer_draw(player_name)
+            if error:
+                return error
+            opponent = 1 - pos
+            opponent_name = room.players[opponent]
+            return {
+                'action': 'chess_notify',
+                'message': f"已向 {opponent_name} 提出和棋。等待对方回应...\n对方可输入 /accept 或 /decline",
+                'notify_room': {
+                    'room_id': room.room_id,
+                    'message': f"{player_name} 提出和棋。输入 /accept 接受，/decline 拒绝。",
+                    'room_data': room.get_table_data()
+                }
+            }
+        
+        # 接受/拒绝和棋（对局中）
+        if cmd == '/accept' and location == 'chess_playing':
+            room = engine.get_player_room(player_name)
+            if not room or room.state != 'playing':
+                return "当前不在对局中。"
+            result = room.accept_draw(player_name)
+            if result:
+                return self._finish_chess_game(room, result)
+            return "没有待接受的和棋提议。"
+        
+        if cmd == '/decline':
+            room = engine.get_player_room(player_name)
+            if not room:
+                return "当前不在对局中。"
+            if room.decline_draw(player_name):
+                return {
+                    'action': 'chess_notify',
+                    'message': "已拒绝和棋。",
+                    'notify_room': {
+                        'room_id': room.room_id,
+                        'message': f"{player_name} 拒绝了和棋。",
+                        'room_data': room.get_table_data()
+                    }
+                }
+            return "没有待拒绝的和棋提议。"
+        
+        # 直接输入走法（不带 /m 前缀）
+        if location == 'chess_playing' and not cmd.startswith('/'):
+            room = engine.get_player_room(player_name)
+            if room and room.state == 'playing':
+                pos = room.get_position(player_name)
+                if pos == room.current_side():
+                    return self._process_chess_move(player_name, room, cmd + (' ' + args if args else ''))
+        
+        return None
+    
+    def _process_chess_move(self, player_name, room, move_text):
+        """处理国际象棋走棋"""
+        from games.chess.game_engine import format_game_result
+        
+        success, san, result = room.make_move(player_name, move_text.strip())
+        if not success:
+            return result  # result 是错误信息
+        
+        pos = room.get_position(player_name)
+        
+        # 对局结束
+        if result and result.get('type') not in ('check', None):
+            return self._finish_chess_game(room, result, last_move_san=san)
+        
+        msg = f"→ {san}"
+        if result and result.get('type') == 'check':
+            msg += "  ♚ 将军！"
+        
+        notify_data = {
+            'room_id': room.room_id,
+            'message': f"{player_name} 走了: {san}",
+            'room_data': room.get_table_data(),
+        }
+        
+        # 如果对方是机器人，让机器人走
+        opponent = 1 - pos
+        if room.is_bot(room.players[opponent]) and room.state == 'playing':
+            bot_san, bot_result = room.make_bot_move()
+            if bot_san:
+                msg += f"\n\n← {room.players[opponent]}: {bot_san}"
+                
+                if bot_result and bot_result.get('type') not in ('check', None):
+                    return self._finish_chess_game(room, bot_result, last_move_san=bot_san)
+                
+                if bot_result and bot_result.get('type') == 'check':
+                    msg += "  ♚ 将军！"
+                
+                msg += "\n轮到你走棋"
+                notify_data['room_data'] = room.get_table_data()
+        else:
+            msg += f"\n\n轮到 {room.players[opponent]} 走棋"
+        
+        return {
+            'action': 'chess_move',
+            'message': msg,
+            'room_data': room.get_table_data(),
+            'notify_room': notify_data,
+        }
+    
+    def _finish_chess_game(self, room, result, last_move_san=None):
+        """处理国际象棋对局结束"""
+        from games.chess.game_engine import format_game_result
+        from .player_manager import PlayerManager
+        
+        result_text = format_game_result(result) or "对局结束"
+        
+        msg = ""
+        if last_move_san:
+            msg += f"  最后一手: {last_move_san}\n"
+        msg += f"\n────── 🏁 {result_text} ──────\n\n"
+        msg += f"走法: {room.format_move_history(20)}\n"
+        
+        # 处理段位变化
+        rank_msg = ""
+        if room.is_ranked_match():
+            rank_msg = self._process_chess_ranked_result(room, result)
+        
+        # 处理对局统计
+        self._process_chess_game_stats(room, result)
+        
+        if rank_msg:
+            msg += rank_msg + "\n"
+        
+        msg += "输入 /back 离开房间，或等待新对局"
+        
+        # 所有玩家返回房间
+        for p in room.players.values():
+            if p and not room.is_bot(p):
+                self.set_player_location(p, 'chess_room')
+        
+        return {
+            'action': 'chess_game_end',
+            'location': 'chess_room',
+            'message': msg,
+            'room_data': room.get_table_data(),
+            'notify_room': {
+                'room_id': room.room_id,
+                'message': f"🏁 {result_text}",
+                'room_data': room.get_table_data(),
+                'location': 'chess_room'
+            }
+        }
+    
+    def _process_chess_ranked_result(self, room, result):
+        """处理国际象棋段位场结果"""
+        from .user_schema import (
+            get_rank_info, get_rank_name, get_rank_index,
+            get_chess_rank_points_change, get_title_id_from_rank, RANK_ORDER
+        )
+        from .player_manager import PlayerManager
+        
+        rtype = result.get('type')
+        msg_parts = []
+        
+        for i in range(2):
+            pname = room.players[i]
+            if not pname or room.is_bot(pname):
+                continue
+            
+            player_data = self.online_players.get(pname)
+            if not player_data:
+                player_data = PlayerManager.load_player_data(pname)
+            if not player_data:
+                continue
+            
+            chess_data = player_data.get('chess', {})
+            current_rank = chess_data.get('rank', 'novice_1')
+            current_points = chess_data.get('rank_points', 0)
+            
+            # 确定胜负
+            if rtype in ('checkmate', 'resign', 'timeout'):
+                outcome = 'win' if result.get('winner') == i else 'loss'
+            else:
+                outcome = 'draw'
+            
+            points_change = get_chess_rank_points_change(current_rank, outcome)
+            new_points = max(0, current_points + points_change)
+            
+            rank_info = get_rank_info(current_rank)
+            new_rank = current_rank
+            promoted = False
+            demoted = False
+            
+            # 升段检查
+            points_up = rank_info.get('points_up')
+            if points_up and new_points >= points_up:
+                idx = get_rank_index(current_rank)
+                if idx < len(RANK_ORDER) - 1:
+                    new_rank = RANK_ORDER[idx + 1]
+                    new_points = 0
+                    promoted = True
+            
+            # 降段检查
+            points_down = rank_info.get('points_down')
+            if points_down is not None and current_points + points_change < 0:
+                idx = get_rank_index(current_rank)
+                if idx > 0:
+                    prev_rank = RANK_ORDER[idx - 1]
+                    prev_info = get_rank_info(prev_rank)
+                    if rank_info['tier'] > 2 or (rank_info['tier'] == 2 and prev_info['tier'] == 2):
+                        new_rank = prev_rank
+                        new_points = prev_info.get('points_up', 40) // 2
+                        demoted = True
+            
+            chess_data['rank'] = new_rank
+            chess_data['rank_points'] = new_points
+            
+            if get_rank_index(new_rank) > get_rank_index(chess_data.get('max_rank', 'novice_1')):
+                chess_data['max_rank'] = new_rank
+            
+            if promoted:
+                title_id = get_title_id_from_rank(new_rank)
+                if title_id:
+                    titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
+                    if title_id not in titles['owned']:
+                        titles['owned'].append(title_id)
+                    player_data['titles'] = titles
+            
+            player_data['chess'] = chess_data
+            PlayerManager.save_player_data(pname, player_data)
+            
+            sign = '+' if points_change > 0 else ''
+            msg_parts.append(f"  {pname}: {sign}{points_change}pt → {get_rank_name(new_rank)} ({new_points}pt)")
+            if promoted:
+                msg_parts.append(f"    🎉 {pname} 升段！→ {get_rank_name(new_rank)}")
+            elif demoted:
+                msg_parts.append(f"    📉 {pname} 降段 → {get_rank_name(new_rank)}")
+        
+        if msg_parts:
+            return "【段位变化】\n" + "\n".join(msg_parts)
+        return ""
+    
+    def _process_chess_game_stats(self, room, result):
+        """更新国际象棋对局统计"""
+        from .player_manager import PlayerManager
+        
+        rtype = result.get('type')
+        
+        for i in range(2):
+            pname = room.players[i]
+            if not pname or room.is_bot(pname):
+                continue
+            
+            player_data = self.online_players.get(pname)
+            if not player_data:
+                player_data = PlayerManager.load_player_data(pname)
+            if not player_data:
+                continue
+            
+            chess_data = player_data.get('chess', {})
+            stats = chess_data.get('stats', {})
+            
+            stats['total_games'] = stats.get('total_games', 0) + 1
+            
+            if rtype in ('checkmate', 'resign', 'timeout'):
+                if result.get('winner') == i:
+                    stats['wins'] = stats.get('wins', 0) + 1
+                else:
+                    stats['losses'] = stats.get('losses', 0) + 1
+            else:
+                stats['draws'] = stats.get('draws', 0) + 1
+            
+            if room.is_ranked_match():
+                stats['ranked_games'] = stats.get('ranked_games', 0) + 1
+            
+            tc = room.time_control
+            if tc == 'blitz':
+                stats['blitz_games'] = stats.get('blitz_games', 0) + 1
+            elif tc == 'rapid':
+                stats['rapid_games'] = stats.get('rapid_games', 0) + 1
+            elif tc == 'classical':
+                stats['classical_games'] = stats.get('classical_games', 0) + 1
+            
+            chess_data['stats'] = stats
+            player_data['chess'] = chess_data
+            
+            # 检查象棋头衔
+            self._check_chess_titles(player_data, stats)
+            
+            PlayerManager.save_player_data(pname, player_data)
+    
+    def _check_chess_titles(self, player_data, stats):
+        """根据国际象棋统计检查并授予头衔"""
+        titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
+        owned = titles['owned']
+        
+        checks = [
+            ('chess_beginner', stats.get('total_games', 0) >= 1),
+            ('chess_10wins', stats.get('wins', 0) >= 10),
+            ('chess_50wins', stats.get('wins', 0) >= 50),
+            ('chess_100wins', stats.get('wins', 0) >= 100),
+        ]
+        
+        for title_id, condition in checks:
+            if condition and title_id not in owned:
+                owned.append(title_id)
+        
+        player_data['titles'] = titles
     
     def get_player_room_data(self, player_name):
         """获取玩家所在房间的数据（用于UI更新）"""
@@ -2817,6 +3800,14 @@ class LobbyEngine:
             if room:
                 return {
                     'game': 'mahjong',
+                    'room_data': room.get_table_data()
+                }
+        if location in ('chess_room', 'chess_playing') and 'chess' in self.game_engines:
+            engine = self.game_engines['chess']
+            room = engine.get_player_room(player_name)
+            if room:
+                return {
+                    'game': 'chess',
                     'room_data': room.get_table_data()
                 }
         return None

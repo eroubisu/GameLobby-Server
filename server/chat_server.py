@@ -1564,6 +1564,26 @@ class ChatServer:
                             )
                         PlayerManager.save_player_data(name, player_data)
                         self.send_player_status(client_socket, player_data)
+                    # ========== 国际象棋动作 ==========
+                    elif action in ('chess_room_update', 'chess_game_start', 'chess_game_end', 'chess_move', 'chess_notify'):
+                        self._send_result_fields(client_socket, result)
+                        if 'notify_room' in result:
+                            notify = result['notify_room']
+                            room_id = notify['room_id']
+                            notify_msg = notify.get('message', '')
+                            notify_room_data = notify.get('room_data')
+                            notify_location = notify.get('location')
+                            engine = self.lobby_engine.game_engines.get('chess')
+                            if engine:
+                                room = engine.get_room(room_id)
+                                if room:
+                                    def _send_chess_notify(client, pname, pos):
+                                        self.send_to(client, {'type': 'room_update', 'message': notify_msg, 'room_data': notify_room_data})
+                                        if notify_location:
+                                            self.send_to(client, {'type': 'location_update', 'location': notify_location})
+                                    self._for_each_room_player(room, _send_chess_notify, exclude_player=name)
+                        PlayerManager.save_player_data(name, player_data)
+                        self.send_player_status(client_socket, player_data)
                 else:
                     self.send_to(client_socket, {'type': 'game', 'text': result})
                     PlayerManager.save_player_data(name, player_data)

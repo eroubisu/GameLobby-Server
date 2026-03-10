@@ -41,6 +41,9 @@ LOCATION_HIERARCHY = {
     'mahjong': ('麻将', 'lobby'),
     'mahjong_room': ('房间', 'mahjong'),
     'mahjong_playing': ('对局中', 'mahjong_room'),
+    'chess': ('国际象棋', 'lobby'),
+    'chess_room': ('房间', 'chess'),
+    'chess_playing': ('对局中', 'chess_room'),
 }
 
 # 确保目录存在

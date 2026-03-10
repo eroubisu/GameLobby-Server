@@ -101,6 +101,17 @@ RANK_POINTS_SOUTH = {  # 南风战 (点数翻倍)
     6: {1: 160, 2: 60, 3: -60, 4: -120},
 }
 
+# 国际象棋段位点数变化表 (1v1: 胜/负/和)
+# 格式: {tier: {'win': 点数, 'loss': 点数, 'draw': 点数}}
+CHESS_RANK_POINTS = {
+    1: {'win': 20, 'loss': 0,   'draw': 10},    # 初心
+    2: {'win': 30, 'loss': -15, 'draw': 5},      # 雀士
+    3: {'win': 40, 'loss': -20, 'draw': 5},      # 雀杰
+    4: {'win': 50, 'loss': -30, 'draw': 5},      # 雀豪
+    5: {'win': 60, 'loss': -40, 'draw': 0},      # 雀圣
+    6: {'win': 70, 'loss': -50, 'draw': 0},      # 魂天
+}
+
 # ==================== 头衔库 ====================
 # 所有可获得的头衔定义
 # 格式: { 'id': {'name': 显示名, 'source': 来源, 'desc': 描述, 'condition': 获得条件} }
@@ -182,6 +193,32 @@ TITLE_LIBRARY = {
         'condition': '累计获得一位50次',
     },
     
+    # ===== 国际象棋头衔 =====
+    'chess_beginner': {
+        'name': '弈士',
+        'source': 'chess',
+        'desc': '踏入棋坛',
+        'condition': '完成第一局国际象棋对局',
+    },
+    'chess_10wins': {
+        'name': '十胜棋手',
+        'source': 'chess',
+        'desc': '小有所成',
+        'condition': '国际象棋获胜10局',
+    },
+    'chess_50wins': {
+        'name': '棋坛新星',
+        'source': 'chess',
+        'desc': '冉冉升起',
+        'condition': '国际象棋获胜50局',
+    },
+    'chess_100wins': {
+        'name': '百胜棋王',
+        'source': 'chess',
+        'desc': '百战百胜',
+        'condition': '国际象棋获胜100局',
+    },
+    
     # ===== 社交头衔 =====
     'chat_active': {
         'name': '话痨',
@@ -224,6 +261,7 @@ RANK_TO_TITLE = {
 TITLE_SOURCES = {
     'system': '系统',
     'mahjong': '麻将',
+    'chess': '国际象棋',
     'jrpg': 'JRPG',
     'social': '社交',
     'event': '活动',
@@ -359,6 +397,23 @@ def get_default_user_template(name="", password_hash=""):
                 
                 'highest_hand': None,     # 最高得点役满记录
                 'yakuman_count': 0,       # 役满次数
+            },
+        },
+        
+        # 国际象棋数据
+        'chess': {
+            'rank': 'novice_1',
+            'rank_points': 0,
+            'max_rank': 'novice_1',
+            'stats': {
+                'total_games': 0,
+                'wins': 0,
+                'losses': 0,
+                'draws': 0,
+                'ranked_games': 0,
+                'blitz_games': 0,
+                'rapid_games': 0,
+                'classical_games': 0,
             },
         },
         
@@ -560,3 +615,20 @@ def can_enter_match(rank_id, match_type):
 def get_title_id_from_rank(rank_id):
     """根据段位ID获取对应的头衔ID，无对应头衔则返回None"""
     return RANK_TO_TITLE.get(rank_id)
+
+
+def get_chess_rank_points_change(rank_id, outcome):
+    """
+    获取国际象棋段位点数变化
+    
+    Args:
+        rank_id: 段位ID
+        outcome: 'win', 'loss', 'draw'
+        
+    Returns:
+        点数变化值
+    """
+    rank_info = get_rank_info(rank_id)
+    tier = rank_info['tier']
+    tier_points = CHESS_RANK_POINTS.get(tier, CHESS_RANK_POINTS[1])
+    return tier_points.get(outcome, 0)
