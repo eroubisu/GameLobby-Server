@@ -48,6 +48,40 @@ class LobbyEngine:
     def get_player_location(self, player_name):
         """获取玩家当前位置"""
         return self.player_locations.get(player_name, 'lobby')
+
+    # ── 布局校验 ──
+
+    _VALID_MODULES = {'chat', 'cmd', 'info_table', 'game', 'online'}
+
+    def _validate_layout(self, data, depth=0) -> bool:
+        """白名单校验布局 JSON，防止注入"""
+        if depth > 10:
+            return False
+        if not isinstance(data, dict):
+            return False
+        t = data.get('type')
+        if t == 'pane':
+            mod = data.get('module')
+            if mod is not None and mod not in self._VALID_MODULES:
+                return False
+            pid = data.get('id')
+            if not isinstance(pid, str) or len(pid) > 20:
+                return False
+            return set(data.keys()) <= {'type', 'module', 'id'}
+        if t in ('hsplit', 'vsplit'):
+            children = data.get('children')
+            if not isinstance(children, list) or len(children) < 2 or len(children) > 20:
+                return False
+            weights = data.get('weights')
+            if weights is not None:
+                if not isinstance(weights, list) or len(weights) != len(children):
+                    return False
+                if not all(isinstance(w, (int, float)) and 0.25 <= w <= 10 for w in weights):
+                    return False
+            if not set(data.keys()) <= {'type', 'children', 'weights'}:
+                return False
+            return all(self._validate_layout(c, depth + 1) for c in children)
+        return False
     
     def set_player_location(self, player_name, location):
         """设置玩家位置"""
@@ -842,6 +876,20 @@ class LobbyEngine:
             except ValueError:
                 return "请输入头衔编号。使用 /mytitle 查看列表。"
         
+        elif cmd == '/layout':
+            # 保存客户端窗口布局（NVim 风格）
+            if not args:
+                return None
+            import json as _json
+            try:
+                layout = _json.loads(args)
+                if not self._validate_layout(layout):
+                    return None
+                player_data['window_layout'] = layout
+            except (ValueError, TypeError):
+                pass
+            return None
+
         elif cmd == '/exit':
             # 设置待确认状态
             self.pending_confirms[player_name] = 'exit'

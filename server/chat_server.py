@@ -1591,6 +1591,13 @@ class ChatServer:
             else:
                 self.send_to(client_socket, {'type': 'game', 'text': '未知指令。输入 /help 查看帮助。'})
         
+        elif msg_type == 'save_layout':
+            layout = msg.get('layout')
+            if isinstance(layout, dict):
+                if self.lobby_engine._validate_layout(layout):
+                    player_data['window_layout'] = layout
+                    PlayerManager.save_player_data(name, player_data)
+
         elif msg_type == 'chat':
             channel = msg.get('channel', 1)
             display_name = f"[Lv.{player_data['level']}]{name}"
@@ -1629,7 +1636,8 @@ class ChatServer:
                 'gold': player_data['gold'],
                 'title': get_title_name(title_id),
                 'accessory': player_data.get('accessory'),
-                'avatar': player_data.get('avatar')
+                'avatar': player_data.get('avatar'),
+                'window_layout': player_data.get('window_layout'),
             }
             
             # 获取JRPG游戏数据用于地图显示（如果在玩JRPG）

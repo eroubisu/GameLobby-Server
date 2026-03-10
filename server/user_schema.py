@@ -431,7 +431,10 @@ def get_default_user_template(name="", password_hash=""):
                 'inventory': [],
                 'equipment': {'weapon': None, 'armor': None}
             }
-        }
+        },
+
+        # 客户端窗口布局（NVim 风格，存储序列化的布局树）
+        'window_layout': None,
     }
 
 
