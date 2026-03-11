@@ -264,6 +264,10 @@ class ActionsMixin:
         self.waiting_for_action = False
         self.action_players = []
         
+        # 副露发生，所有玩家第一巡结束（影响天和/地和/双立直）
+        for i in range(4):
+            self.first_turn[i] = False
+        
         # 轮到碰的人出牌
         self.current_turn = position
         
@@ -323,6 +327,10 @@ class ActionsMixin:
         self.last_discarder = None
         self.waiting_for_action = False
         self.action_players = []
+        
+        # 副露发生，所有玩家第一巡结束
+        for i in range(4):
+            self.first_turn[i] = False
         
         # 一发失效
         for i in range(4):
@@ -524,6 +532,10 @@ class ActionsMixin:
         self.waiting_for_action = False
         self.action_players = []
         
+        # 副露发生，所有玩家第一巡结束
+        for i in range(4):
+            self.first_turn[i] = False
+        
         # 一发失效
         for i in range(4):
             self.ippatsu[i] = False
@@ -622,14 +634,18 @@ class ActionsMixin:
         self.current_turn = (position + 1) % 4
         self.just_drew = False
         
+        # 永久振听检查：打出的牌是自己听的牌 → 永久振听
+        if not self.furiten[position]:
+            tenpai_tiles = self.get_tenpai_tiles(position)
+            if normalize_tile(tile) in [normalize_tile(t) for t in tenpai_tiles]:
+                self.furiten[position] = True
+        
         # 清除吃换禁止状态（打出任何牌后都清除）
         self.just_chowed[position] = False
         self.kuikae_forbidden[position] = []
         
-        # 第一巡结束检查（任何人打牌后第一巡结束）
-        for i in range(4):
-            if self.turn_count >= 4:
-                self.first_turn[i] = False
+        # 第一巡结束检查：打牌的玩家第一巡结束
+        self.first_turn[position] = False
         
         # 打牌后一发失效
         self.ippatsu[position] = False
@@ -745,6 +761,9 @@ class ActionsMixin:
             # 如果过掉了胡牌，设置同巡振听
             if self.last_discard and self.can_win(self.hands[position], self.last_discard):
                 self.temp_furiten[position] = True
+                # 立直中过掉荣和 → 永久振听（直到局结束）
+                if self.riichi[position]:
+                    self.furiten[position] = True
         
         # 如果所有人都pass了，清除等待状态
         if not self.action_players:

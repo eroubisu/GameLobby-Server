@@ -1,14 +1,19 @@
 """
-游戏模块
+游戏模块 — 自动注册 + 位置自动注入
 """
+
+from server.config import register_game_locations
 
 # 注册的游戏列表
 GAMES = {}
 
 
 def register_game(game_id, game_module):
-    """注册游戏"""
+    """注册游戏并自动注入位置层级"""
     GAMES[game_id] = game_module
+    info = getattr(game_module, 'GAME_INFO', {})
+    if info.get('locations'):
+        register_game_locations(info)
 
 
 def get_game(game_id):
@@ -25,7 +30,7 @@ def get_all_games():
     return result
 
 
-# 自动注册游戏
+# 注册所有游戏（添加新游戏只需在此添加一行）
 from . import jrpg
 from . import mahjong
 from . import chess as chess_game

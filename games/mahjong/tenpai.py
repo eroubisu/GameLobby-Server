@@ -1,6 +1,7 @@
 """
 麻将游戏 - 听牌分析模块
 """
+from .mahjong_utils import can_win as _bridge_can_win, estimate_hand
 
 
 class TenpaiMixin:
@@ -57,39 +58,25 @@ class TenpaiMixin:
         Returns:
             list: 役列表，如果无役则返回空列表
         """
-        from .game_data import normalize_tile
-        from .yaku import analyze_hand
-        
-        # 构建完整手牌
         full_hand = hand + [win_tile]
         
-        # 获取风
         winds = ['东', '南', '西', '北']
         player_wind = winds[(position - self.dealer) % 4]
         
-        # 分析役
-        yaku_result = analyze_hand(
+        result = estimate_hand(
             hand_tiles=full_hand,
             melds=self.melds[position],
             win_tile=win_tile,
             is_tsumo=is_tsumo,
             is_riichi=self.riichi[position],
-            is_ippatsu=False,  # 简化判断
-            is_rinshan=False,
-            is_chankan=False,
-            is_haitei=False,
-            is_houtei=False,
-            is_tenhou=False,
-            is_chihou=False,
             is_double_riichi=self.double_riichi[position],
             player_wind=player_wind,
             round_wind=self.round_wind,
-            dora_count=0,  # 不计宝牌
-            ura_dora_count=0,
-            red_dora_count=0
         )
         
-        return yaku_result.yakus if yaku_result else []
+        if result and not result.get('error'):
+            return result['yaku']
+        return []
     
     def get_tenpai_analysis(self, position):
         """获取听牌分析（当前听牌 + 打出某牌后的听牌 + 剩余张数）
@@ -219,8 +206,7 @@ class TenpaiMixin:
     
     def _can_win_with_hand(self, hand, tile):
         """检查给定手牌加上一张牌是否能胡牌（不修改原手牌）"""
-        temp_hand = hand + [tile]
-        return self._check_win_pattern(temp_hand)
+        return _bridge_can_win(hand, tile)
     
     def can_win(self, hand, new_tile):
         """检查是否可以胡牌
@@ -232,114 +218,7 @@ class TenpaiMixin:
         Returns:
             bool: 是否可以胡牌
         """
-        # 将手牌和新牌组合
-        tiles = hand.copy()
-        tiles.append(new_tile)
-        
-        # 胡牌需要 3N+2 的结构（N个面子 + 1个雀头）
-        # 考虑副露的情况，手牌可能是 3N+2 - 3*已副露数
-        return self._check_win_pattern(tiles)
-    
-    def _check_win_pattern(self, tiles):
-        """检查牌型是否能胡
-        
-        需要满足以下其中一种：
-        1. 标准形：1个雀头 + N个面子（顺子或刻子）
-        2. 七对子：7个不同的对子（14张牌）
-        3. 国士无双：13种幺九牌各1张 + 任意1张幺九牌（14张牌）
-        """
-        if len(tiles) < 2:
-            return False
-        
-        # 标准化牌名（赤牌转普通牌）
-        from .game_data import normalize_tile, YAOJIU
-        normalized_tiles = [normalize_tile(t) for t in tiles]
-        
-        # 统计每张牌的数量
-        tile_count = {}
-        for tile in normalized_tiles:
-            tile_count[tile] = tile_count.get(tile, 0) + 1
-        
-        # 检查七对子（14张牌，7种牌各2张）
-        if len(tiles) == 14:
-            if len(tile_count) == 7 and all(c == 2 for c in tile_count.values()):
-                return True
-        
-        # 检查国士无双（14张牌，13种幺九牌各1张 + 任意1张幺九牌）
-        if len(tiles) == 14:
-            yaojiu_set = set(YAOJIU)
-            # 检查是否只有幺九牌
-            all_yaojiu = all(t in yaojiu_set for t in normalized_tiles)
-            # 检查是否包含所有13种幺九牌
-            has_all_yaojiu = yaojiu_set.issubset(set(normalized_tiles))
-            if all_yaojiu and has_all_yaojiu:
-                return True
-        
-        # 尝试每种牌作为雀头（标准形）
-        for pair_tile in tile_count:
-            if tile_count[pair_tile] >= 2:
-                # 移除雀头后检查剩余牌能否组成面子
-                remaining = tile_count.copy()
-                remaining[pair_tile] -= 2
-                if remaining[pair_tile] == 0:
-                    del remaining[pair_tile]
-                if self._check_melds_pattern(remaining):
-                    return True
-        return False
-    
-    def _check_melds_pattern(self, tile_count):
-        """检查是否能全部组成面子（顺子或刻子）"""
-        if not tile_count:
-            return True
-        
-        # 获取第一张牌
-        first_tile = min(tile_count.keys(), key=self._tile_sort_key)
-        count = tile_count[first_tile]
-        
-        # 尝试组成刻子
-        if count >= 3:
-            remaining = tile_count.copy()
-            remaining[first_tile] -= 3
-            if remaining[first_tile] == 0:
-                del remaining[first_tile]
-            if self._check_melds_pattern(remaining):
-                return True
-        
-        # 尝试组成顺子（只有数牌可以）
-        next_tiles = self._get_sequence_tiles(first_tile)
-        if next_tiles:
-            t1, t2 = next_tiles
-            if t1 in tile_count and tile_count[t1] >= 1 and t2 in tile_count and tile_count[t2] >= 1:
-                remaining = tile_count.copy()
-                remaining[first_tile] -= 1
-                remaining[t1] -= 1
-                remaining[t2] -= 1
-                if remaining[first_tile] == 0:
-                    del remaining[first_tile]
-                if remaining[t1] == 0:
-                    del remaining[t1]
-                if remaining[t2] == 0:
-                    del remaining[t2]
-                if self._check_melds_pattern(remaining):
-                    return True
-        
-        return False
-    
-    def _get_sequence_tiles(self, tile):
-        """获取顺子的下两张牌，如果不是数牌返回None"""
-        from .game_data import get_tile_suit, get_tile_number, get_tile_by_suit_number
-        
-        suit = get_tile_suit(tile)
-        num = get_tile_number(tile)
-        
-        if suit == 'zi' or num is None or num > 7:
-            return None
-        
-        t1 = get_tile_by_suit_number(suit, num + 1)
-        t2 = get_tile_by_suit_number(suit, num + 2)
-        if t1 and t2:
-            return (t1, t2)
-        return None
+        return _bridge_can_win(hand, new_tile)
     
     def check_yakuman_certain(self, position):
         """检查玩家是否处于役满确定状态
@@ -352,53 +231,36 @@ class TenpaiMixin:
         Returns:
             bool: 是否役满确定
         """
-        from .yaku import analyze_hand
-        
         hand = self.hands[position]
-        if len(hand) % 3 != 1:  # 不是听牌状态
+        if len(hand) % 3 != 1:
             return False
         
         waiting_tiles = self.get_tenpai_tiles(position)
         if not waiting_tiles:
             return False
         
-        # 获取风
         winds = ['东', '南', '西', '北']
         player_wind = winds[(position - self.dealer) % 4]
         
-        # 检查每个待牌是否都是役满
         for tile in waiting_tiles:
             full_hand = hand + [tile]
             
-            # 检查自摸和荣和两种情况
             for is_tsumo in [True, False]:
-                yaku_result = analyze_hand(
+                result = estimate_hand(
                     hand_tiles=full_hand,
                     melds=self.melds[position],
                     win_tile=tile,
                     is_tsumo=is_tsumo,
                     is_riichi=self.riichi[position],
-                    is_ippatsu=False,
-                    is_rinshan=False,
-                    is_chankan=False,
-                    is_haitei=False,
-                    is_houtei=False,
-                    is_tenhou=False,
-                    is_chihou=False,
                     is_double_riichi=self.double_riichi[position],
                     player_wind=player_wind,
                     round_wind=self.round_wind,
-                    dora_count=0,
-                    ura_dora_count=0,
-                    red_dora_count=0
                 )
                 
-                if not yaku_result or not yaku_result.yakus:
+                if not result or result.get('error'):
                     return False
                 
-                # 检查是否有役满
-                has_yakuman = any(y[2] for y in yaku_result.yakus)  # y[2] 是 is_yakuman
-                if not has_yakuman:
+                if not result.get('is_yakuman', False):
                     return False
         
         return True

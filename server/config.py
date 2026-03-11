@@ -32,19 +32,19 @@ CHAT_HISTORY_DIR = os.path.join(CHAT_LOG_DIR, 'history')
 # 系统维护时间（北京时间凌晨4点）
 MAINTENANCE_HOUR = 4
 
-# 位置层级定义
+# 位置层级定义（基础层级 + 游戏自动注入）
 # 格式: {位置: (显示名称, 父位置)}
 LOCATION_HIERARCHY = {
     'lobby': ('游戏大厅', None),
     'profile': ('个人资料', 'lobby'),
-    'jrpg': ('JRPG', 'lobby'),
-    'mahjong': ('麻将', 'lobby'),
-    'mahjong_room': ('房间', 'mahjong'),
-    'mahjong_playing': ('对局中', 'mahjong_room'),
-    'chess': ('国际象棋', 'lobby'),
-    'chess_room': ('房间', 'chess'),
-    'chess_playing': ('对局中', 'chess_room'),
 }
+
+
+def register_game_locations(game_info: dict) -> None:
+    """从 GAME_INFO 的 locations 字段注入位置到全局层级"""
+    locations = game_info.get('locations', {})
+    for loc_id, (display_name, parent) in locations.items():
+        LOCATION_HIERARCHY[loc_id] = (display_name, parent)
 
 # 确保目录存在
 os.makedirs(USERS_DIR, exist_ok=True)

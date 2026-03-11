@@ -213,13 +213,13 @@ class ChessRoom:
         if pos != self.current_side():
             return False, None, "还没轮到你走棋"
 
-        # 更新计时
-        self._update_clock()
-
-        # 尝试解析 SAN 或 UCI 走法
+        # 先验证走法，无效走法不扣时间
         move = self._parse_move(san_or_uci)
         if move is None:
             return False, None, f"无效走法: {san_or_uci}\n输入 /moves 查看合法走法"
+
+        # 走法有效，更新计时
+        self._update_clock()
 
         # 记录 SAN（在 push 之前获取）
         san = self.board.san(move)
@@ -243,12 +243,13 @@ class ChessRoom:
         if player_name not in self.bots:
             return None, None
 
-        self._update_clock()
-
         depth = self.MATCH_AI_DEPTH.get(self.match_type, 2)
         move = get_best_move(self.board, depth)
         if move is None:
             return None, None
+
+        # Bot 走法有效，更新计时
+        self._update_clock()
 
         san = self.board.san(move)
         self.board.push(move)
@@ -261,10 +262,12 @@ class ChessRoom:
         return san, result
 
     def resign(self, player_name):
-        """认输"""
+        """认输，返回 (result, error)"""
         pos = self.get_position(player_name)
-        if pos < 0 or self.state != 'playing':
-            return None
+        if pos < 0:
+            return None, "你不在这个房间中"
+        if self.state != 'playing':
+            return None, "当前不在对局中"
         self.state = 'finished'
         winner = 1 - pos
         return {
@@ -272,7 +275,7 @@ class ChessRoom:
             'winner': winner,
             'winner_name': self.players[winner],
             'loser_name': player_name,
-        }
+        }, None
 
     def offer_draw(self, player_name):
         """提出和棋"""

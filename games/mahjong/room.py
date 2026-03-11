@@ -643,15 +643,16 @@ class MahjongRoom(TenpaiMixin, ActionsMixin, ScoringMixin):
     
     def get_table_display(self):
         """获取牌桌显示（用于右上角面板）"""
+        from server.text_utils import pad_center, truncate
         lines = []
         lines.append("┌─────────────────┐")
-        lines.append(f"│    {self.POSITIONS[2]}:{self.players[2] or '空位':^6}   │")
+        lines.append(f"│    {self.POSITIONS[2]}:{pad_center(self.players[2] or '空位', 8)}  │")
         lines.append("│  ┌───────────┐  │")
         lines.append(f"│{self.POSITIONS[3]}│           │{self.POSITIONS[1]}│")
-        lines.append(f"│ │   🀄牌桌   │ │")
-        lines.append(f"│{self.players[3] or '空':^2}│           │{self.players[1] or '空':^2}│")
+        lines.append(f"│  │  🀄牌桌   │  │")
+        lines.append(f"│{pad_center(truncate(self.players[3] or '空', 2), 2)}│           │{pad_center(truncate(self.players[1] or '空', 2), 2)}│")
         lines.append("│  └───────────┘  │")
-        lines.append(f"│    {self.POSITIONS[0]}:{self.players[0] or '空位':^6}   │")
+        lines.append(f"│    {self.POSITIONS[0]}:{pad_center(self.players[0] or '空位', 8)}  │")
         lines.append("└─────────────────┘")
         return lines
     

@@ -1,5 +1,6 @@
 """
 JRPG 游戏引擎 - 处理游戏逻辑和指令
+实现 GameEngine 标准接口（per_player 模式）
 """
 
 import random
@@ -11,6 +12,96 @@ class JRPGEngine:
     def __init__(self, game_data):
         self.game_data = game_data
         self.battles = {}  # {player_name: monster}
+
+    # ==================== 标准接口 ====================
+
+    def handle_command(self, lobby, player_name, player_data, cmd, args):
+        """标准接口: 处理JRPG指令"""
+        jrpg_data = player_data.get('games', {}).get('jrpg', {})
+        # 注入全局字段供内部方法使用
+        jrpg_data['name'] = player_name
+        jrpg_data['gold'] = player_data.get('gold', 0)
+
+        command = f"{cmd} {args}".strip() if args else cmd
+        result = self.process_command(jrpg_data, command)
+
+        # 同步金币回全局，清理临时字段
+        player_data['gold'] = jrpg_data.pop('gold', player_data.get('gold', 0))
+        jrpg_data.pop('name', None)
+
+        if result is None:
+            return None
+        # 拦截退出相关action，交给lobby处理
+        if isinstance(result, dict):
+            action = result.get('action')
+            if action == 'exit_confirm':
+                return None  # 让lobby处理 /exit
+            if action == 'exit':
+                return None
+        return result
+
+    def handle_disconnect(self, lobby, player_name):
+        """处理玩家断线"""
+        self.battles.pop(player_name, None)
+        return []
+
+    def handle_back(self, lobby, player_name, player_data):
+        """处理 /back — 返回大厅"""
+        self.battles.pop(player_name, None)
+        lobby.set_player_location(player_name, 'lobby')
+        return {
+            'action': 'location_update',
+            'message': '已返回游戏大厅。\n输入 /games 查看可用游戏。'
+        }
+
+    def handle_quit(self, lobby, player_name, player_data):
+        """处理 /quit 或 /home"""
+        return self.handle_back(lobby, player_name, player_data)
+
+    def get_welcome_message(self, player_data):
+        """获取进入JRPG时的欢迎信息"""
+        jrpg_data = player_data.get('games', {}).get('jrpg', {})
+        area = self.game_data.get_area(jrpg_data.get('current_area', 'forest'))
+        area_name = area['name'] if area else '未知'
+        level = jrpg_data.get('level', 1)
+        hp = jrpg_data.get('hp', 100)
+        max_hp = jrpg_data.get('max_hp', 100)
+
+        return {
+            'action': 'location_update',
+            'message': (
+                f"────── ⚔️ JRPG冒险 ──────\n\n"
+                f"  Lv.{level}  HP: {hp}/{max_hp}\n"
+                f"  当前区域: {area_name}\n\n"
+                "  /help          指令列表\n"
+                "  /status        查看状态\n"
+                "  /explore       探索区域\n"
+                "  /back          返回大厅\n"
+            )
+        }
+
+    def get_status_extras(self, player_name, player_data):
+        """返回状态栏附加数据（地图）"""
+        jrpg_data = player_data.get('games', {}).get('jrpg', {})
+        current_area = jrpg_data.get('current_area', 'forest')
+        return {
+            'area': current_area,
+            'map': self.get_map(current_area),
+        }
+
+    def get_profile_extras(self, player_data):
+        """返回个人资料附加行"""
+        jrpg_data = player_data.get('games', {}).get('jrpg', {})
+        level = jrpg_data.get('level', 1)
+        return f"JRPG等级: Lv.{level}"
+
+    def get_player_room_data(self, player_name):
+        """JRPG没有房间概念"""
+        return None
+
+    def get_map(self, area_id):
+        """获取区域地图数据"""
+        return self.game_data.get_map(area_id)
     
     def get_help_text(self):
         """获取帮助文本"""

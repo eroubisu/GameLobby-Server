@@ -18,45 +18,16 @@ class ScoringMixin:
         Returns:
             dict: 胡牌结果信息
         """
-        from .game_data import normalize_tile, is_red_dora, DORA_NEXT
-        from .yaku import analyze_hand, calculate_fu, calculate_score
+        from .yaku import analyze_hand, calculate_score
         
         hand = self.hands[winner_pos].copy()
         if not is_tsumo and win_tile not in hand:
             hand.append(win_tile)
         
-        # 计算宝牌数
-        dora_count = 0
-        for indicator in self.dora_indicators:
-            dora = DORA_NEXT.get(normalize_tile(indicator), indicator)
-            for t in hand:
-                if normalize_tile(t) == dora:
-                    dora_count += 1
-            for m in self.melds[winner_pos]:
-                for t in m.get('tiles', []):
-                    if normalize_tile(t) == dora:
-                        dora_count += 1
-        
-        # 里宝牌（只有立直才能看）
-        ura_dora_count = 0
-        if self.riichi[winner_pos]:
-            for indicator in self.ura_dora_indicators:
-                dora = DORA_NEXT.get(normalize_tile(indicator), indicator)
-                for t in hand:
-                    if normalize_tile(t) == dora:
-                        ura_dora_count += 1
-                for m in self.melds[winner_pos]:
-                    for t in m.get('tiles', []):
-                        if normalize_tile(t) == dora:
-                            ura_dora_count += 1
-        
-        # 赤宝牌数
-        red_dora_count = sum(1 for t in hand if is_red_dora(t))
-        for m in self.melds[winner_pos]:
-            red_dora_count += sum(1 for t in m.get('tiles', []) if is_red_dora(t))
-        
-        # 分析役种
+        # 分析役种（宝牌通过指示牌传入，库自动计算）
         player_wind = self.get_player_wind(winner_pos)
+        ura_indicators = self.ura_dora_indicators if self.riichi[winner_pos] else None
+        
         yaku_result = analyze_hand(
             hand_tiles=hand,
             melds=self.melds[winner_pos],
@@ -73,35 +44,21 @@ class ScoringMixin:
             is_double_riichi=self.double_riichi[winner_pos],
             player_wind=player_wind,
             round_wind=self.round_wind,
-            dora_count=dora_count,
-            ura_dora_count=ura_dora_count,
-            red_dora_count=red_dora_count
+            dora_indicators=self.dora_indicators,
+            ura_dora_indicators=ura_indicators,
         )
         
         # 检查是否有役
         if not yaku_result.yakus:
             return {'success': False, 'error': '无役'}
         
-        # 计算番数和符数
+        # 番数和符数（已由库计算）
         if yaku_result.is_yakuman:
-            han = 13  # 役满按13番算
+            han = 13
             fu = 0
         else:
             han = yaku_result.total_han
-            
-            # 解析手牌结构计算符数
-            from .yaku import parse_hand_structure
-            normalized_hand = [normalize_tile(t) for t in hand]
-            structures = parse_hand_structure(normalized_hand, self.melds[winner_pos])
-            
-            if structures:
-                is_menzen = all(m.get('concealed', False) or m['type'] == 'concealed_kong' 
-                               for m in self.melds[winner_pos])
-                fu = calculate_fu(structures[0], self.melds[winner_pos], 
-                                  normalize_tile(win_tile), is_tsumo, is_menzen,
-                                  player_wind, self.round_wind)
-            else:
-                fu = 25  # 七对子等特殊型
+            fu = yaku_result.fu
         
         # 计算点数
         is_dealer = winner_pos == self.dealer
@@ -151,6 +108,11 @@ class ScoringMixin:
         else:
             self._renchan = False
             self.honba = 0  # 轮庄本场归零
+        
+        # 从役列表中提取宝牌数（用于显示）
+        dora_count = sum(h for name, h, _ in yaku_result.yakus if name == '宝牌')
+        ura_dora_count = sum(h for name, h, _ in yaku_result.yakus if name == '里宝牌')
+        red_dora_count = sum(h for name, h, _ in yaku_result.yakus if name == '赤宝牌')
         
         result = {
             'success': True,
