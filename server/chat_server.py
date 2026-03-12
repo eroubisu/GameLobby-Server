@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from .config import HOST, PORT, CHAT_LOG_DIR, CHAT_HISTORY_DIR, MAINTENANCE_HOUR
 from .player_manager import PlayerManager
 from .lobby_engine import LobbyEngine
-from .user_schema import get_title_name
+from .user_schema import get_title_name, grant_title
 
 # 北京时区
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -63,34 +63,91 @@ class ChatServer:
     
     # ── Rich Result 通用分发器 ──
 
+    # 框架级消息类型 — 客户端核心直接处理，不包装
+    _FRAMEWORK_MSG_TYPES = frozenset({
+        'game', 'room_update', 'location_update', 'room_leave', 'game_quit',
+        'status', 'online_users', 'chat', 'system', 'action',
+        'login_prompt', 'login_success', 'request_avatar', 'chat_history',
+        'game_invite', 'game_event',
+    })
+
+    def _wrap_game_event(self, msg, game_type):
+        """将游戏特有消息自动包装为 game_event 信封。
+
+        框架级消息（room_update/game/location_update 等）直接透传，
+        游戏特有消息（hand_update/action_prompt/win_animation 等）包装为：
+        {'type': 'game_event', 'game_type': ..., 'event': ..., 'data': {...}}
+        """
+        if not isinstance(msg, dict):
+            return msg
+        t = msg.get('type', '')
+        if not t or t in self._FRAMEWORK_MSG_TYPES:
+            return msg
+        data = {k: v for k, v in msg.items() if k != 'type'}
+        return {'type': 'game_event', 'game_type': game_type, 'event': t, 'data': data}
+
+    def _resolve_game_type(self, caller_name):
+        """从玩家位置推断当前游戏类型"""
+        if not caller_name:
+            return ''
+        loc = self.lobby_engine.get_player_location(caller_name)
+        gid = self.lobby_engine._get_game_for_location(loc)
+        return gid or ''
+
     def dispatch_game_result(self, result, caller_socket=None, caller_name=None, caller_data=None):
         """通用游戏结果分发器 — Rich Result Protocol。
 
         游戏引擎返回 send_to_caller / send_to_players / schedule / save，
         本方法只做无脑投递，不解读游戏内容。
+        游戏特有消息类型自动包装为 game_event 信封。
         """
+        action = result.get('action', '') if isinstance(result, dict) else ''
+        game_type = self._resolve_game_type(caller_name)
+
         # 1. send_to_caller
         if caller_socket:
             for msg in result.get('send_to_caller', []):
+                msg = self._wrap_game_event(msg, game_type)
+                self._inject_location_path(msg)
                 self.send_to(caller_socket, msg)
 
         # 2. send_to_players
         for target, messages in result.get('send_to_players', {}).items():
             for msg in messages:
+                msg = self._wrap_game_event(msg, game_type)
+                self._inject_location_path(msg)
                 self.send_to_player(target, msg)
 
-        # 3. schedule
+        # 3. 位置变更：自动向 caller 发送 location_update / room_leave
+        if caller_socket and caller_name and action in ('location_update', 'back_to_game'):
+            loc, path = self._resolve_location(caller_name, result)
+            msg_type = 'room_leave' if action == 'back_to_game' else 'location_update'
+            loc_msg = {'type': msg_type, 'location': loc, 'location_path': path}
+            self._inject_location_path(loc_msg)
+            self.send_to(caller_socket, loc_msg)
+
+        # 4. schedule
         for task in result.get('schedule', []):
             gid = task.get('game_id', '')
             sched = self.bot_schedulers.get(gid)
             if sched and hasattr(sched, 'handle_schedule'):
                 sched.handle_schedule(task)
 
-        # 4. save
-        if result.get('save') and caller_name and caller_data:
+        # 5. save / status
+        if caller_name and caller_data:
             PlayerManager.save_player_data(caller_name, caller_data)
             if caller_socket:
                 self.send_player_status(caller_socket, caller_data)
+
+    def _inject_location_path(self, msg):
+        """为 location_update/room_leave 消息注入面包屑路径和指令列表"""
+        if isinstance(msg, dict) and msg.get('type') in ('location_update', 'room_leave'):
+            loc = msg.get('location')
+            if loc:
+                if 'location_path' not in msg:
+                    msg['location_path'] = self.lobby_engine.get_location_path(loc)
+                if 'commands' not in msg:
+                    msg['commands'] = self.lobby_engine.get_commands_for_location(loc)
 
     def send_to_player(self, player_name, data):
         """发送消息给指定玩家（Bot调度器回调接口）"""
@@ -181,27 +238,14 @@ class ChatServer:
         from datetime import datetime
         now = datetime.now()
         
-        titles = player_data.get('titles', {'owned': [], 'displayed': []})
-        if 'owned' not in titles:
-            titles['owned'] = []
-        
-        changed = False
-        
-        # 2025年早期玩家头衔（2025年内注册的账号）
+        # 2025年早期玩家头衔
         created_at = player_data.get('created_at', '')
-        if created_at.startswith('2025') and 'early_bird' not in titles['owned']:
-            titles['owned'].append('early_bird')
-            changed = True
+        if created_at.startswith('2025'):
+            grant_title(player_data, 'early_bird')
         
-        # 2025圣诞节头衔 (12月24-26日)
+        # 2025圣诞节头衔
         if now.year == 2025 and now.month == 12 and 24 <= now.day <= 26:
-            if 'christmas_2025' not in titles['owned']:
-                titles['owned'].append('christmas_2025')
-                changed = True
-        
-        if changed:
-            player_data['titles'] = titles
-            PlayerManager.save_player_data(player_data['name'], player_data)
+            grant_title(player_data, 'christmas_2025')
 
     def _track_login_day(self, player_data):
         """记录登录天数并检查veteran头衔"""
@@ -216,12 +260,8 @@ class ChatServer:
             social_stats['login_days'] = social_stats.get('login_days', 0) + 1
             player_data['social_stats'] = social_stats
             
-            # 检查veteran头衔
             if social_stats['login_days'] >= 30:
-                titles = player_data.get('titles', {'owned': [], 'displayed': []})
-                if 'veteran' not in titles.get('owned', []):
-                    titles.setdefault('owned', []).append('veteran')
-                    player_data['titles'] = titles
+                grant_title(player_data, 'veteran')
             
             PlayerManager.save_player_data(player_data['name'], player_data)
 
@@ -231,12 +271,8 @@ class ChatServer:
         social_stats['chat_messages'] = social_stats.get('chat_messages', 0) + 1
         player_data['social_stats'] = social_stats
         
-        # 检查chat_active头衔
         if social_stats['chat_messages'] >= 1000:
-            titles = player_data.get('titles', {'owned': [], 'displayed': []})
-            if 'chat_active' not in titles.get('owned', []):
-                titles.setdefault('owned', []).append('chat_active')
-                player_data['titles'] = titles
+            grant_title(player_data, 'chat_active')
 
     def _save_chat_log(self, channel, name, text):
         """保存聊天记录"""
@@ -307,7 +343,7 @@ class ChatServer:
         # 通知所有玩家
         self.broadcast({
             'type': 'system',
-            'text': '⚠️ 系统维护时间到，请在1分钟内保存数据并退出，服务器即将重置聊天记录...'
+            'text': '⚠ 系统维护时间到，请在1分钟内保存数据并退出，服务器即将重置聊天记录...'
         })
         
         # 等待30秒
@@ -316,7 +352,7 @@ class ChatServer:
         # 再次通知
         self.broadcast({
             'type': 'system',
-            'text': '⚠️ 系统维护中，正在归档聊天记录...'
+            'text': '⚠ 系统维护中，正在归档聊天记录...'
         })
         
         # 断开所有客户端
@@ -435,8 +471,8 @@ class ChatServer:
             return
         
         if msg_type == 'avatar_update':
-            avatar_data = msg.get('avatar')
-            if avatar_data and state == 'register':
+            avatar_data = msg.get('avatar') or None
+            if state == 'register':
                 # 注册流程：将头像数据传给 _handle_register
                 self._handle_register(client_socket, avatar_data)
                 return
@@ -557,11 +593,14 @@ class ChatServer:
             if 'temp_password' in self.clients[client_socket]:
                 del self.clients[client_socket]['temp_password']
         
-        self.send_to(client_socket, {'type': 'login_success', 'text': f'注册成功！输入 /help 查看指令。'})
+        self.send_to(client_socket, {'type': 'login_success', 'text': f'注册成功！'})
         self.send_player_status(client_socket, player_data)
         
         # 注册到游戏大厅引擎（用于邀请功能）
         self.lobby_engine.register_player(name, player_data)
+        
+        # 下发初始位置指令集
+        self._send_initial_location(client_socket, name)
         
         # 发送聊天历史
         self._send_chat_history(client_socket, 1)
@@ -620,11 +659,14 @@ class ChatServer:
                 self.clients[client_socket]['state'] = 'playing'
                 self.clients[client_socket]['data'] = player_data
             
-            self.send_to(client_socket, {'type': 'login_success', 'text': f'登录成功！输入 /help 查看指令。'})
+            self.send_to(client_socket, {'type': 'login_success', 'text': f'登录成功！'})
             self.send_player_status(client_socket, player_data)
             
             # 注册到游戏大厅引擎（用于邀请功能）
             self.lobby_engine.register_player(name, player_data)
+            
+            # 下发初始位置指令集
+            self._send_initial_location(client_socket, name)
             
             # 发送聊天历史
             self._send_chat_history(client_socket, 1)
@@ -639,25 +681,91 @@ class ChatServer:
         else:
             self.send_to(client_socket, {'type': 'login_prompt', 'text': '密码错误，请重试（/back 返回）：'})
 
+    def _send_initial_location(self, client_socket, name):
+        """登录成功后下发初始位置（含指令列表）"""
+        loc = self.lobby_engine.get_player_location(name)
+        msg = {
+            'type': 'location_update',
+            'location': loc,
+            'location_path': self.lobby_engine.get_location_path(loc, name),
+        }
+        self._inject_location_path(msg)
+        self.send_to(client_socket, msg)
+
+    def _resolve_location(self, name, result):
+        """从 result 或 lobby 获取当前位置和面包屑"""
+        loc = result.get('location') if isinstance(result, dict) else None
+        if not loc:
+            loc = self.lobby_engine.get_player_location(name)
+        path = self.lobby_engine.get_location_path(loc, name) if loc else None
+        return loc, path
+
     def _handle_simple_result(self, client_socket, name, player_data, result):
         """处理不含 send_to_caller/send_to_players 的简单游戏结果"""
         action = result.get('action', '')
         if result.get('message'):
             self.send_to(client_socket, {'type': 'game', 'text': result['message']})
-        if 'hand' in result:
-            hand_data = {'type': 'hand_update', 'hand': result['hand']}
-            for key in ('drawn', 'tenpai_analysis', 'need_discard'):
-                if key in result:
-                    hand_data[key] = result[key]
-            self.send_to(client_socket, hand_data)
+        # 透传游戏特有事件（game_events 列表）
+        for evt in result.get('game_events', []):
+            self.send_to(client_socket, evt)
         if 'room_data' in result:
             self.send_to(client_socket, {'type': 'room_update', 'room_data': result['room_data']})
         if action == 'back_to_game':
-            self.send_to(client_socket, {'type': 'room_leave', 'location': result.get('location')})
-        elif 'location' in result:
-            self.send_to(client_socket, {'type': 'location_update', 'location': result['location']})
+            loc, path = self._resolve_location(name, result)
+            loc_msg = {'type': 'room_leave', 'location': loc, 'location_path': path}
+            self._inject_location_path(loc_msg)
+            self.send_to(client_socket, loc_msg)
+        elif action == 'location_update' or 'location' in result:
+            loc, path = self._resolve_location(name, result)
+            loc_msg = {'type': 'location_update', 'location': loc, 'location_path': path}
+            self._inject_location_path(loc_msg)
+            self.send_to(client_socket, loc_msg)
         PlayerManager.save_player_data(name, player_data)
         self.send_player_status(client_socket, player_data)
+
+    def _dispatch_result(self, client_socket, name, player_data, result):
+        """分发 lobby_engine.process_command 的结果"""
+        if isinstance(result, dict) and 'action' in result:
+            action = result['action']
+
+            # ── 大厅级动作（不携带 game_id） ──
+            if action == 'clear':
+                self.send_to(client_socket, {'type': 'action', 'action': 'clear'})
+            elif action == 'version':
+                self.send_to(client_socket, {
+                    'type': 'action', 'action': 'version',
+                    'server_version': result.get('server_version', '未知')})
+            elif action == 'confirm_prompt':
+                self.send_to(client_socket, {
+                    'type': 'game', 'text': result.get('message', '')})
+            elif action == 'exit':
+                self.send_to(client_socket, {'type': 'action', 'action': 'exit'})
+                PlayerManager.save_player_data(name, player_data)
+            elif action == 'request_avatar':
+                self.send_to(client_socket, {'type': 'request_avatar', 'text': '请绘制你的新头像！'})
+            elif action == 'rename_success':
+                old_name = result.get('old_name')
+                new_name = result.get('new_name')
+                self.clients[client_socket]['name'] = new_name
+                self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
+                PlayerManager.save_player_data(new_name, player_data)
+                self.send_player_status(client_socket, player_data)
+                self.broadcast({'type': 'chat', 'name': '[SYS]',
+                                'text': f'{old_name} 改名为 {new_name}', 'channel': 1})
+            elif action == 'account_deleted':
+                self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
+                self.send_to(client_socket, {'type': 'action', 'action': 'exit'})
+
+            # ── 通用游戏动作分发 ──
+            else:
+                if 'send_to_caller' in result or 'send_to_players' in result:
+                    self.dispatch_game_result(result, client_socket, name, player_data)
+                else:
+                    self._handle_simple_result(client_socket, name, player_data, result)
+        else:
+            self.send_to(client_socket, {'type': 'game', 'text': result})
+            PlayerManager.save_player_data(name, player_data)
+            self.send_player_status(client_socket, player_data)
 
     def _handle_playing(self, client_socket, msg):
         with self.lock:
@@ -669,52 +777,22 @@ class ChatServer:
         text = msg.get('text', '').strip()
         
         if msg_type == 'command':
-            result = self.lobby_engine.process_command(player_data, text)
+            try:
+                result = self.lobby_engine.process_command(player_data, text)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.send_to(client_socket, {'type': 'game', 'text': f'[服务器错误] {e}'})
+                return
             if result:
-                if isinstance(result, dict) and 'action' in result:
-                    action = result['action']
-
-                    # ── 大厅级动作（不携带 game_id） ──
-                    if action == 'clear':
-                        self.send_to(client_socket, {'type': 'action', 'action': 'clear'})
-                    elif action == 'version':
-                        self.send_to(client_socket, {
-                            'type': 'action', 'action': 'version',
-                            'server_version': result.get('server_version', '未知')})
-                    elif action == 'confirm_prompt':
-                        self.send_to(client_socket, {
-                            'type': 'game', 'text': result.get('message', ''),
-                            'clear_discard': True})
-                    elif action == 'exit':
-                        self.send_to(client_socket, {'type': 'action', 'action': 'exit'})
-                        PlayerManager.save_player_data(name, player_data)
-                    elif action == 'request_avatar':
-                        self.send_to(client_socket, {'type': 'request_avatar', 'text': '请绘制你的新头像！'})
-                    elif action == 'rename_success':
-                        old_name = result.get('old_name')
-                        new_name = result.get('new_name')
-                        self.clients[client_socket]['name'] = new_name
-                        self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        PlayerManager.save_player_data(new_name, player_data)
-                        self.send_player_status(client_socket, player_data)
-                        self.broadcast({'type': 'chat', 'name': '[SYS]',
-                                        'text': f'{old_name} 改名为 {new_name}', 'channel': 1})
-                    elif action == 'account_deleted':
-                        self.send_to(client_socket, {'type': 'game', 'text': result.get('message', '')})
-                        self.send_to(client_socket, {'type': 'action', 'action': 'exit'})
-
-                    # ── 通用游戏动作分发 ──
-                    else:
-                        if 'send_to_caller' in result or 'send_to_players' in result:
-                            self.dispatch_game_result(result, client_socket, name, player_data)
-                        else:
-                            self._handle_simple_result(client_socket, name, player_data, result)
-                else:
-                    self.send_to(client_socket, {'type': 'game', 'text': result})
-                    PlayerManager.save_player_data(name, player_data)
-                    self.send_player_status(client_socket, player_data)
+                try:
+                    self._dispatch_result(client_socket, name, player_data, result)
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self.send_to(client_socket, {'type': 'game', 'text': f'[服务器错误] {e}'})
             else:
-                self.send_to(client_socket, {'type': 'game', 'text': '未知指令。输入 /help 查看帮助。'})
+                self.send_to(client_socket, {'type': 'game', 'text': '未知指令。'})
         
         elif msg_type == 'save_layout':
             layout = msg.get('layout')
@@ -776,6 +854,8 @@ class ChatServer:
                     extras = engine.get_status_extras(player_name, player_data) or {}
             
             status_msg = {'type': 'status', 'data': status_data}
+            status_msg['location'] = location
+            status_msg['location_path'] = self.lobby_engine.get_location_path(location, player_name)
             status_msg.update(extras)
             self.send_to(client_socket, status_msg)
         except:

@@ -1,16 +1,6 @@
-"""
-游戏大厅指令引擎
+"""游戏大厅指令引擎"""
 
-职责:
-- 全局指令处理（帮助、资料、头衔、背包等）
-- 游戏引擎的注册和路由
-- 玩家位置管理
-- 大厅级待确认状态（exit/rename/password/delete）
-
-游戏内指令一律委托给对应引擎的标准接口处理。
-"""
-
-from .config import LOCATION_HIERARCHY, SERVER_VERSION
+from .config import COMMAND_TABLE, LOCATION_HIERARCHY, SERVER_VERSION
 from games import get_game, get_all_games, GAMES
 
 
@@ -90,21 +80,40 @@ class LobbyEngine:
 
     # ── 位置工具 ──
 
-    def get_location_path(self, location):
-        """获取位置的完整路径（面包屑导航）"""
+    def get_location_path(self, location, player_name=None):
+        """获取位置的完整路径（面包屑导航）
+        
+        当提供 player_name 且玩家在房间中时，自动附加房间号。
+        """
         path = []
+        path_keys = []
         current = location
         while current:
             info = LOCATION_HIERARCHY.get(current)
             if info:
                 path.append(info[0])
+                path_keys.append(current)
                 current = info[1]
             else:
                 path.append(current)
+                path_keys.append(current)
                 break
         path.reverse()
+        path_keys.reverse()
         if not path:
             return '游戏大厅'
+        # 附加房间号到"房间"层级
+        if player_name and location and ('_room' in location or '_playing' in location):
+            game_id = self._get_game_for_location(location)
+            if game_id:
+                engine = self._get_engine(game_id, player_name)
+                if engine and hasattr(engine, 'get_player_room'):
+                    room = engine.get_player_room(player_name)
+                    if room and hasattr(room, 'room_id'):
+                        for i, key in enumerate(path_keys):
+                            if '_room' in key:
+                                path[i] = f"{path[i]}#{room.room_id}"
+                                break
         return ' > '.join(path)
 
     def get_parent_location(self, location):
@@ -117,6 +126,12 @@ class LobbyEngine:
     def get_online_player_names(self):
         """获取在线玩家名列表"""
         return list(self.online_players.keys())
+
+    def get_commands_for_location(self, location: str) -> list[dict]:
+        """获取指定位置的全部可用指令（全局 + 位置专属，含游戏注册的指令）"""
+        commands = list(COMMAND_TABLE.get('*', []))
+        commands.extend(COMMAND_TABLE.get(location, []))
+        return commands
 
     # ── 游戏路由 helpers ──
 
@@ -174,30 +189,29 @@ class LobbyEngine:
             icon = game.get('icon', '🎮')
             name = game.get('name', game.get('id', '???'))
             game_id = game.get('id', '???')
-            game_list += f"  {icon} {pad_left(name, 12)} /play {game_id}\n"
+            game_list += f"  {icon} {pad_left(name, 12)} play {game_id}\n"
 
         return (
             "\n========== 游戏大厅 ==========\n\n"
             "【基础指令】\n"
-            "  /help           - 显示此帮助\n"
-            "  /help <游戏>    - 查看游戏说明书\n"
-            "  /games          - 查看游戏列表\n"
-            "  /play <游戏>    - 进入游戏\n\n"
+            "  help           - 显示此帮助\n"
+            "  help <游戏>    - 查看游戏说明书\n"
+            "  games          - 查看游戏列表\n"
+            "  play <游戏>    - 进入游戏\n\n"
             "【导航指令】\n"
-            "  /back           - 返回上一级\n"
-            "  /quit           - 离开当前游戏\n"
-            "  /home           - 直接返回大厅\n\n"
+            "  back           - 返回上一级\n"
+            "  home           - 直接返回大厅\n\n"
             "【可用游戏】\n"
             f"{game_list}"
             "\n【个人中心】\n"
-            "  /profile        - 查看个人资料\n"
-            "  /mytitle        - 查看我的头衔\n"
-            "  /alltitle       - 查看头衔图鉴\n"
-            "  /title <编号>   - 切换显示的头衔\n\n"
+            "  profile        - 查看个人资料\n"
+            "  mytitle        - 查看我的头衔\n"
+            "  alltitle       - 查看头衔图鉴\n"
+            "  title <编号>   - 切换显示的头衔\n\n"
             "【其他指令】\n"
-            "  /version        - 查看版本信息\n"
-            "  /clear          - 清屏\n"
-            "  /exit           - 关闭程序\n\n"
+            "  version        - 查看版本信息\n"
+            "  clear          - 清屏\n"
+            "  exit           - 关闭程序\n\n"
             "==============================\n"
         )
 
@@ -205,7 +219,7 @@ class LobbyEngine:
         """获取游戏帮助文本（通用）"""
         game_module = get_game(game_id)
         if not game_module:
-            return f"未找到游戏: {game_id}\n使用 /games 查看可用游戏列表。"
+            return f"未找到游戏: {game_id}"
 
         # 优先: 模块提供的 get_help_text(page)
         get_help = getattr(game_module, 'get_help_text', None)
@@ -230,8 +244,7 @@ class LobbyEngine:
         desc = info.get('description', '暂无描述')
         min_p = info.get('min_players', '?')
         max_p = info.get('max_players', '?')
-        return (f"{name}\n{desc}\n\n玩家人数: {min_p}-{max_p}人\n\n"
-                f"使用 /play {game_id} 开始游戏\n")
+        return f"{name}\n{desc}\n\n玩家人数: {min_p}-{max_p}人\n"
 
     def get_games_list(self):
         """获取游戏列表"""
@@ -250,7 +263,7 @@ class LobbyEngine:
             if desc:
                 text += f"     {desc}\n"
             text += "\n"
-        text += "使用 /play <游戏ID> 进入游戏"
+        text += "使用 play <游戏ID> 进入游戏"
         return text
 
     # ── 个人资料 ──
@@ -294,14 +307,13 @@ class LobbyEngine:
                 f"注册时间: {player_data.get('created_at', '未知')}\n"
                 f"\n==============================\n\n"
                 "【可用操作】\n"
-                "  /avatar        - 修改头像\n"
-                "  /mytitle       - 查看我的头衔\n"
-                "  /alltitle      - 查看头衔图鉴\n"
-                "  /rename <新名> - 修改用户名\n"
-                "  /password      - 修改密码\n"
-                "  /delete        - 删除账号\n"
-                "  /back          - 返回大厅\n"
-                "  /home          - 返回大厅\n"
+                "  avatar        - 修改头像\n"
+                "  mytitle       - 查看我的头衔\n"
+                "  alltitle      - 查看头衔图鉴\n"
+                "  rename <新名> - 修改用户名\n"
+                "  password      - 修改密码\n"
+                "  delete        - 删除账号\n"
+                "  back          - 返回大厅\n"
             )
         }
 
@@ -312,7 +324,7 @@ class LobbyEngine:
 
         if cmd == '/rename':
             if not args:
-                return "用法: /rename <新用户名>"
+                return "用法: rename <新用户名>"
             new_name = args
             rename_cards = player_data.get('inventory', {}).get('rename_card', 0)
             if rename_cards <= 0:
@@ -326,7 +338,7 @@ class LobbyEngine:
                 'type': 'rename',
                 'data': new_name
             }
-            return f"确定要将用户名改为 '{new_name}' 吗？（消耗1张改名卡）\n输入 /y 确认，其他任意键取消。"
+            return f"确定要将用户名改为 '{new_name}' 吗？（消耗1张改名卡）\n输入 y 确认，其他任意键取消。"
 
         if cmd == '/password':
             self.pending_confirms[player_name] = {'type': 'password_start'}
@@ -378,12 +390,11 @@ class LobbyEngine:
             return {'action': 'clear'}
 
         if cmd == '/version':
-            return {'action': 'version', 'message': f"服务器版本: v{SERVER_VERSION}"}
+            return {'action': 'version', 'server_version': SERVER_VERSION}
 
         if cmd == '/exit':
             self.pending_confirms[player_name] = {'type': 'exit'}
-            return ('⚠️ /exit 会关闭整个程序！确定要退出吗？输入 /y 确认。\n'
-                    '提示: 如果只是想离开当前游戏，请使用 /quit 或 /back')
+            return '⚠ exit 会关闭整个程序！确定要退出吗？输入 y 确认。'
 
         if cmd == '/profile':
             return self.get_profile(player_data)
@@ -407,19 +418,19 @@ class LobbyEngine:
                 player_name, player_data, cmd, args)
             if result is not None:
                 return result
-            if cmd in ('/back', '/quit', '/home'):
+            if cmd in ('/back', '/home'):
                 self.set_player_location(player_name, 'lobby')
                 return {
                     'action': 'location_update',
-                    'message': '已返回游戏大厅。\n输入 /games 查看可用游戏。'
+                    'message': '已返回游戏大厅。'
                 }
 
         # ── 5. 进入游戏 ──
         if cmd == '/play':
             if location not in ('lobby', 'profile'):
-                return '请先返回大厅再进入其他游戏。输入 /home 返回大厅。'
+                return '请先返回大厅再进入其他游戏。'
             if not args:
-                return '用法: /play <游戏ID>\n使用 /games 查看可用游戏列表。'
+                return '用法: play <游戏ID>'
             return self._enter_game(player_name, player_data, args.lower().strip())
 
         # ── 6. 游戏内指令路由 ──
@@ -427,20 +438,19 @@ class LobbyEngine:
         if game_id:
             engine = self._get_engine(game_id, player_name)
             if engine:
-                # /back, /quit, /home 委托引擎
                 if cmd == '/back':
                     return engine.handle_back(self, player_name, player_data)
-                if cmd in ('/quit', '/home'):
+                if cmd == '/home':
                     return engine.handle_quit(self, player_name, player_data)
                 # 其他游戏指令
                 result = engine.handle_command(
                     self, player_name, player_data, cmd, args)
                 if result is not None:
                     return result
-            return f"未知指令。输入 /help {game_id} 查看帮助。"
+            return '未知指令。'
 
-        # ── 7. 大厅 /back, /quit, /home ──
-        if cmd in ('/back', '/quit', '/home'):
+        # ── 7. 大厅 /back, /home ──
+        if cmd in ('/back', '/home'):
             if location == 'lobby':
                 return '你已经在大厅了。'
             parent = self.get_parent_location(location)
@@ -452,10 +462,10 @@ class LobbyEngine:
 
         if not cmd.startswith('/'):
             if location == 'profile':
-                return '请输入头衔编号。使用 /mytitle 查看列表。'
+                return '请输入头衔编号。'
             return None
 
-        return '未知指令。输入 /help 查看帮助。'
+        return '未知指令。'
 
     # ── 进入游戏 ──
 
@@ -483,14 +493,16 @@ class LobbyEngine:
 
         # 获取欢迎信息
         if hasattr(engine, 'get_welcome_message'):
-            return engine.get_welcome_message(player_data)
-
-        return {
-            'action': 'location_update',
-            'message': (f"{info.get('icon', '🎮')} 进入 {info.get('name', game_id)}\n\n"
-                        f"输入 /help {game_id} 查看游戏说明\n"
-                        f"输入 /quit 或 /back 离开游戏\n")
-        }
+            result = engine.get_welcome_message(player_data)
+        else:
+            result = {
+                'action': 'location_update',
+                'message': f"{info.get('icon', '🎮')} 进入 {info.get('name', game_id)}\n"
+            }
+        # 确保客户端收到 location 更新
+        if isinstance(result, dict) and 'location' not in result:
+            result['location'] = root_location
+        return result
 
     # ── 大厅级待确认处理 ──
 
@@ -498,6 +510,11 @@ class LobbyEngine:
         """处理大厅级待确认状态（exit/rename/password/delete）"""
         pending_type = pending.get('type') if isinstance(pending, dict) else pending
         pending_data = pending.get('data') if isinstance(pending, dict) else None
+
+        # 客户端自动补的 / 前缀，在需要原始输入的场景剥离
+        raw_input = command.strip()
+        if raw_input.startswith('/'):
+            raw_input = raw_input[1:]
 
         # 退出确认
         if pending_type == 'exit':
@@ -516,7 +533,7 @@ class LobbyEngine:
         # 修改密码 - 输入新密码
         if pending_type == 'password_start':
             self.pending_confirms.pop(player_name, None)
-            new_password = command.strip()
+            new_password = raw_input
             if len(new_password) < 6 or len(new_password) > 20:
                 return '密码长度需要在6-20个字符之间。已取消。'
             self.pending_confirms[player_name] = {
@@ -528,14 +545,14 @@ class LobbyEngine:
         # 修改密码 - 确认密码
         if pending_type == 'password_confirm':
             self.pending_confirms.pop(player_name, None)
-            if command.strip() != pending_data:
+            if raw_input != pending_data:
                 return '两次输入的密码不一致。已取消。'
             return self._do_change_password(player_name, pending_data)
 
         # 删除账号 - 确认用户名
         if pending_type == 'delete_start':
             self.pending_confirms.pop(player_name, None)
-            input_name = command.strip()
+            input_name = raw_input
             if input_name != player_name:
                 return '用户名不匹配。已取消。'
             self.pending_confirms[player_name] = {'type': 'delete_password'}
@@ -544,7 +561,7 @@ class LobbyEngine:
         # 删除账号 - 确认密码
         if pending_type == 'delete_password':
             self.pending_confirms.pop(player_name, None)
-            input_password = command.strip()
+            input_password = raw_input
             return self._do_delete_account(player_name, input_password)
 
         return None
@@ -622,7 +639,7 @@ class LobbyEngine:
             text = "可用的筛选类别:\n"
             for src, name in TITLE_SOURCES.items():
                 count = sum(1 for t in TITLE_LIBRARY.values() if t.get('source') == src)
-                text += f"  /alltitle {src}  {name} ({count}个头衔)\n"
+                text += f"  alltitle {src}  {name} ({count}个头衔)\n"
             return text
 
         text = "【头衔图鉴】\n"
@@ -699,10 +716,8 @@ class LobbyEngine:
         player_data['social_stats'] = social_stats
 
         if social_stats['invites_sent'] >= 10:
-            titles = player_data.get('titles', {'owned': ['newcomer'], 'displayed': ['newcomer']})
-            if 'friendly' not in titles['owned']:
-                titles['owned'].append('friendly')
-                player_data['titles'] = titles
+            from .user_schema import grant_title
+            grant_title(player_data, 'friendly')
 
         PlayerManager.save_player_data(player_name, player_data)
 

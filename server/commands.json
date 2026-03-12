@@ -1,0 +1,23 @@
+{
+    "*": [
+        {"name": "help",     "label": "帮助",     "desc": "显示帮助信息"},
+        {"name": "games",    "label": "游戏列表", "desc": "查看可用游戏"},
+        {"name": "play",     "label": "进入游戏", "desc": "play <游戏ID>"},
+        {"name": "back",     "label": "返回",     "desc": "返回上一级"},
+        {"name": "home",     "label": "回大厅",   "desc": "直接返回大厅"},
+        {"name": "profile",  "label": "个人资料", "desc": "查看个人资料"},
+        {"name": "mytitle",  "label": "我的头衔", "desc": "查看已拥有头衔"},
+        {"name": "alltitle", "label": "头衔图鉴", "desc": "查看全部头衔"},
+        {"name": "title",    "label": "切换头衔", "desc": "title <编号>"},
+        {"name": "item",     "label": "背包",     "desc": "查看背包物品"},
+        {"name": "clear",    "label": "清屏",     "desc": "清空指令面板"},
+        {"name": "version",  "label": "版本",     "desc": "显示版本信息"},
+        {"name": "exit",     "label": "退出",     "desc": "关闭程序"}
+    ],
+    "profile": [
+        {"name": "avatar",   "label": "头像",   "desc": "修改头像"},
+        {"name": "rename",   "label": "改名",   "desc": "rename <新名>"},
+        {"name": "password", "label": "改密码", "desc": "修改密码"},
+        {"name": "delete",   "label": "删号",   "desc": "删除账号"}
+    ]
+}

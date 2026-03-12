@@ -4,8 +4,8 @@
 
 import os
 import json
-import hashlib
 from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
 from .config import USERS_DIR
 from .user_schema import get_default_user_template, ensure_user_schema, get_rank_name
 
@@ -15,8 +15,16 @@ class PlayerManager:
     
     @staticmethod
     def hash_password(password):
-        """密码哈希"""
-        return hashlib.sha256(password.encode()).hexdigest()
+        """密码哈希（werkzeug scrypt）"""
+        return generate_password_hash(password)
+    
+    @staticmethod
+    def _verify_hash(stored_hash, password):
+        """验证密码，兼容旧版 SHA256 哈希"""
+        if stored_hash and len(stored_hash) == 64 and all(c in '0123456789abcdef' for c in stored_hash):
+            import hashlib
+            return stored_hash == hashlib.sha256(password.encode()).hexdigest()
+        return check_password_hash(stored_hash, password)
     
     @staticmethod
     def _get_user_file(name):
@@ -53,11 +61,18 @@ class PlayerManager:
 
     @staticmethod
     def verify_password(name, password):
-        """验证密码"""
+        """验证密码（自动升级旧 SHA256 哈希为 werkzeug）"""
         data = PlayerManager._load_user_file(name)
         if not data:
             return False
-        return data.get('password_hash') == PlayerManager.hash_password(password)
+        stored = data.get('password_hash', '')
+        if not PlayerManager._verify_hash(stored, password):
+            return False
+        # 自动升级旧的 SHA256 哈希
+        if len(stored) == 64 and all(c in '0123456789abcdef' for c in stored):
+            data['password_hash'] = PlayerManager.hash_password(password)
+            PlayerManager._save_user_file(name, data)
+        return True
     
     @staticmethod
     def _create_initial_data(name, password, avatar_data=None):
@@ -127,23 +142,20 @@ class PlayerManager:
         return True
 
     @staticmethod
-    def delete_player(name):
-        """删除玩家账号"""
+    def delete_player(name, password=None):
+        """删除玩家账号。提供 password 时验证，否则直接删除。"""
+        if password is not None:
+            if not PlayerManager.verify_password(name, password):
+                return False, '密码错误'
         file_path = PlayerManager._get_user_file(name)
         if os.path.exists(file_path):
             os.remove(file_path)
-            return True
-        return False
+            return (True, '账号已删除') if password is not None else True
+        return (False, '用户不存在') if password is not None else False
 
     @staticmethod
     def upgrade_all_users():
-        """
-        升级所有用户数据到最新模板
-        用于服务器启动时或手动运行
-        
-        Returns:
-            (total, updated): 总用户数, 更新的用户数
-        """
+        """升级所有用户数据到最新模板。Returns: (total, updated)"""
         total = 0
         updated = 0
         

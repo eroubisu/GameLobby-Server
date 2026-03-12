@@ -1,6 +1,4 @@
-"""
-房间制游戏共享指令处理器基类
-"""
+"""房间制游戏共享指令处理器基类"""
 
 from server.player_manager import PlayerManager
 
@@ -9,32 +7,30 @@ class BaseRoomCommandHandler:
     """房间制游戏指令处理器基类
 
     子类需实现:
-        game_key: str           -- 游戏ID
-        game_name: str          -- 游戏显示名
-        action_prefix: str      -- 用于 action 字段前缀
-        max_players: int        -- 房间最大人数
-        room_location: str      -- 房间位置名
-        playing_location: str   -- 对局位置名
-
-        _get_match_types()      -- 返回 {key: {name_cn, ranked, min_rank, ...}}
-        _get_title_checks(stats) -- 返回 [(title_id, condition), ...]
-        _get_rank_points_change(rank, result_data) -- 段位点变化
-        _format_stats(player_data) -- 格式化战绩
-        _format_room_list(rooms) -- 格式化房间列表
+        game_key, game_name, action_prefix, max_players,
+        room_location, playing_location,
+        _get_match_types(), _get_title_checks(stats),
+        _get_rank_points_change(rank, result_data),
+        _format_stats(player_data), _format_room_list(rooms)
     """
 
     def __init__(self, engine):
         self.engine = engine
 
-    def _build_notify_players(self, room, message, room_data, exclude=None, location=None):
-        """构建 send_to_players: 给房间内其他玩家发送嵌入消息的 room_update"""
-        players = {}
+    def _iter_room_players(self, room, exclude=None):
+        """迭代房间内的真人玩家（排除 bots 和 exclude）"""
         for i in range(self.max_players):
             p = room.players[i]
             if not p or p == exclude:
                 continue
             if hasattr(room, 'is_bot') and room.is_bot(p):
                 continue
+            yield p
+
+    def _build_notify_players(self, room, message, room_data, exclude=None, location=None):
+        """给房间内其他玩家发送嵌入消息的 room_update"""
+        players = {}
+        for p in self._iter_room_players(room, exclude):
             msgs = [{'type': 'room_update', 'message': message, 'room_data': room_data}]
             if location:
                 msgs.append({'type': 'location_update', 'location': location})
@@ -42,14 +38,9 @@ class BaseRoomCommandHandler:
         return players
 
     def _build_game_notify(self, room, message, room_data, exclude=None, location=None, update_last=False):
-        """构建 send_to_players: 给房间内其他玩家发送独立的文字+room_update"""
+        """给房间内其他玩家发送独立的文字+room_update"""
         players = {}
-        for i in range(self.max_players):
-            p = room.players[i]
-            if not p or p == exclude:
-                continue
-            if hasattr(room, 'is_bot') and room.is_bot(p):
-                continue
+        for p in self._iter_room_players(room, exclude):
             msgs = []
             if message:
                 msgs.append({'type': 'game', 'text': message, 'update_last': update_last})
@@ -76,8 +67,8 @@ class BaseRoomCommandHandler:
         rank_id = game_data.get('rank', 'novice_1')
         rank_points = game_data.get('rank_points', 0)
         max_rank = game_data.get('max_rank', 'novice_1')
-        rank_info = get_rank_info(rank_id)
-        max_rank_info = get_rank_info(max_rank)
+        rank_info = get_rank_info(rank_id, self.game_key)
+        max_rank_info = get_rank_info(max_rank, self.game_key)
 
         points_up = rank_info.get('points_up')
         if points_up:
@@ -164,6 +155,7 @@ class BaseRoomCommandHandler:
     def _cmd_join(self, lobby, player_name, player_data, args):
         """加入房间"""
         from server.user_schema import get_rank_name, get_rank_index
+        _gk = self.game_key
         engine = self.engine
         avatar = player_data.get('avatar')
         location = lobby.get_player_location(player_name)
@@ -186,8 +178,8 @@ class BaseRoomCommandHandler:
         if match_info.get('ranked'):
             player_rank = player_data.get(self.game_key, {}).get('rank', 'novice_1')
             min_rank = match_info.get('min_rank', 'novice_1')
-            if get_rank_index(player_rank) < get_rank_index(min_rank):
-                return f"段位不足！{match_info.get('name_cn', '')}需要 {get_rank_name(min_rank)} 以上。"
+            if get_rank_index(player_rank, _gk) < get_rank_index(min_rank, _gk):
+                return f"段位不足！{match_info.get('name_cn', '')}需要 {get_rank_name(min_rank, _gk)} 以上。"
 
         room, error = engine.join_room(room_id, player_name)
         if error:
@@ -337,18 +329,14 @@ class BaseRoomCommandHandler:
     # ==================== 段位 & 统计 ====================
 
     def _process_ranked_result(self, lobby, room, result_data):
-        """处理段位场结果（通用框架）
-
-        Args:
-            result_data: 游戏结果数据（格式由子类定义）
-        Returns:
-            rank_changes dict
-        """
+        """处理段位场结果，返回 rank_changes dict"""
         from server.user_schema import (
             get_rank_info, get_rank_name, get_rank_index,
-            get_title_id_from_rank, RANK_ORDER
+            get_title_id_from_rank, get_rank_order
         )
 
+        _gk = self.game_key
+        rank_order = get_rank_order(_gk)
         rank_changes = {}
 
         for player_name, outcome_data in self._iter_ranked_players(room, result_data):
@@ -356,14 +344,14 @@ class BaseRoomCommandHandler:
             if not player_data:
                 continue
 
-            game_data = player_data.get(self.game_key, {})
-            current_rank = game_data.get('rank', 'novice_1')
+            game_data = player_data.get(_gk, {})
+            current_rank = game_data.get('rank', rank_order[0])
             current_points = game_data.get('rank_points', 0)
 
             points_change = self._get_rank_points_change(current_rank, outcome_data)
             new_points = max(0, current_points + points_change)
 
-            rank_info = get_rank_info(current_rank)
+            rank_info = get_rank_info(current_rank, _gk)
             new_rank = current_rank
             promoted = False
             demoted = False
@@ -371,19 +359,19 @@ class BaseRoomCommandHandler:
             # 升段检查
             points_up = rank_info.get('points_up')
             if points_up and new_points >= points_up:
-                idx = get_rank_index(current_rank)
-                if idx < len(RANK_ORDER) - 1:
-                    new_rank = RANK_ORDER[idx + 1]
+                idx = get_rank_index(current_rank, _gk)
+                if idx < len(rank_order) - 1:
+                    new_rank = rank_order[idx + 1]
                     new_points = 0
                     promoted = True
 
             # 降段检查
             points_down = rank_info.get('points_down')
             if points_down is not None and current_points + points_change < 0:
-                idx = get_rank_index(current_rank)
+                idx = get_rank_index(current_rank, _gk)
                 if idx > 0:
-                    prev_rank = RANK_ORDER[idx - 1]
-                    prev_info = get_rank_info(prev_rank)
+                    prev_rank = rank_order[idx - 1]
+                    prev_info = get_rank_info(prev_rank, _gk)
                     if rank_info['tier'] > 2 or (rank_info['tier'] == 2 and prev_info['tier'] == 2):
                         new_rank = prev_rank
                         new_points = prev_info.get('points_up', 40) // 2
@@ -392,7 +380,7 @@ class BaseRoomCommandHandler:
             game_data['rank'] = new_rank
             game_data['rank_points'] = new_points
 
-            if get_rank_index(new_rank) > get_rank_index(game_data.get('max_rank', 'novice_1')):
+            if get_rank_index(new_rank, _gk) > get_rank_index(game_data.get('max_rank', rank_order[0]), _gk):
                 game_data['max_rank'] = new_rank
 
             if promoted:
@@ -403,7 +391,7 @@ class BaseRoomCommandHandler:
                         titles['owned'].append(title_id)
                     player_data['titles'] = titles
 
-            player_data[self.game_key] = game_data
+            player_data[_gk] = game_data
             PlayerManager.save_player_data(player_name, player_data)
 
             rank_changes[player_name] = {
@@ -411,7 +399,7 @@ class BaseRoomCommandHandler:
                 'new_points': new_points,
                 'old_rank': current_rank,
                 'new_rank': new_rank,
-                'new_rank_name': get_rank_name(new_rank),
+                'new_rank_name': get_rank_name(new_rank, _gk),
                 'promoted': promoted,
                 'demoted': demoted,
             }

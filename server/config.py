@@ -46,6 +46,21 @@ def register_game_locations(game_info: dict) -> None:
     for loc_id, (display_name, parent) in locations.items():
         LOCATION_HIERARCHY[loc_id] = (display_name, parent)
 
+
+# ── 指令表（从 commands.json 加载）──
+# 格式: {位置: [{"name": str, "label": str, "desc": str}, ...]}
+# "*" 为全局指令（任何位置有效），其余 key 为位置专属指令
+
+import json
+
+def _load_command_table() -> dict[str, list[dict]]:
+    path = os.path.join(os.path.dirname(__file__), 'commands.json')
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+COMMAND_TABLE: dict[str, list[dict]] = _load_command_table()
+
+
 # 确保目录存在
 os.makedirs(USERS_DIR, exist_ok=True)
 os.makedirs(CHAT_LOG_DIR, exist_ok=True)

@@ -4,3 +4,8 @@ data/
 # Python
 *.pyc
 *.pyo
+
+# 部署产物
+server.zip
+server.log
+server.pid
